@@ -1,0 +1,59 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/mhmdxsadk/snatcher/internal/api"
+	"github.com/mhmdxsadk/snatcher/internal/config"
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("snatcher stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	server := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           api.NewHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      45 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.ListenAndServe() }()
+	slog.Info("snatcher starting", "address", cfg.ListenAddr)
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+			return err
+		}
+		err := <-done
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
