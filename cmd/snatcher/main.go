@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mhmdxsadk/snatcher/internal/api"
+	"github.com/mhmdxsadk/snatcher/internal/client"
 	"github.com/mhmdxsadk/snatcher/internal/config"
 )
 
@@ -26,11 +27,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	c, err := client.New(cfg.CobaltURL)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.NewHandler(),
+		Handler:           api.NewHandler(c),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      45 * time.Second,
