@@ -1,6 +1,6 @@
 services:
   snatcher:
-    image: ghcr.io/mhmdxsadk/snatcher:${SNATCHER_TAG:-latest}
+    image: ghcr.io/mhmdxsadk/snatcher:latest
     restart: unless-stopped
     read_only: true
     cap_drop:
@@ -9,9 +9,7 @@ services:
       - no-new-privileges:true
     stop_grace_period: 50s
     ports:
-      - "${SNATCHER_BIND:-127.0.0.1}:8080:8080/tcp"
-    env_file:
-      - .env
+      - "127.0.0.1:8080:8080/tcp"
     environment:
-      COBALT: "${COBALT:?Set COBALT to a URL reachable from the container}"
-      API_KEY: "${API_KEY:?Set API_KEY to a key of at least 32 characters}"
+      COBALT: "http://your-cobalt-host:9000"
+      API_KEY: "CHANGE_ME" # Replace with your key: openssl rand -hex 32
