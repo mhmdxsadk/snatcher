@@ -25,7 +25,7 @@ The Cobalt API must be reachable from the Snatcher container.
 
 ```sh
 docker compose up -d
-curl --fail http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/health
 ```
 
 Keep `127.0.0.1` in `ports` for host-only access. For public access, use
@@ -38,10 +38,10 @@ Point your Shortcut at `https://snatcher.example.com/v1/snatch`.
 Replace `snatcher.example.com` with your domain.
 
 ```sh
-curl --fail-with-body 'https://snatcher.example.com/v1/snatch' \
+curl 'https://snatcher.example.com/v1/snatch' \
   -H 'Content-Type: application/json' \
   -H 'X-API-Key: YOUR_API_KEY' \
-  --data '{"url":"https://www.instagram.com/reel/POST_ID/"}'
+  --data '{"url":"YOUR_MEDIA_URL"}'
 ```
 
 Replace the server URL, API key, and media URL with your own values. See the
