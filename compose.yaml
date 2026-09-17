@@ -11,5 +11,5 @@ services:
     ports:
       - "127.0.0.1:8080:8080/tcp"
     environment:
-      COBALT: "http://your-cobalt-host:9000"
-      API_KEY: "CHANGE_ME" # Replace with your key: openssl rand -hex 32
+      COBALT_API: "http://your-cobalt-host:9000"
+      SNATCHER_API_KEY: "GENERATE_ME" # Generate with: openssl rand -hex 32

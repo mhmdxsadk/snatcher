@@ -60,7 +60,7 @@ func TestSnatcherIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":" https://www.instagram.com/p/example/?igsh=tracking&img_index=2 "}`))
+			req := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":" https://www.instagram.com/p/example/?igsh=tracking&img_index=2 "}`))
 			req.Header.Set("Content-Type", "application/json; charset=utf-8")
 			w := httptest.NewRecorder()
 			NewHandler(c).ServeHTTP(w, req)
@@ -91,20 +91,22 @@ func TestRequestValidation(t *testing.T) {
 		status                                int
 		code, allow                           string
 	}{
-		{"method", "GET", "/v1/snatcher", "", "", 405, "method_not_allowed", "POST"},
+		{"method", "GET", "/v1/snatch", "", "", 405, "method_not_allowed", "POST"},
 		{"health method", "POST", "/health", "", "", 405, "method_not_allowed", "GET, HEAD"},
 		{"root method", "POST", "/", "", "", 405, "method_not_allowed", "GET, HEAD"},
+		{"renamed route", "POST", "/v1/snatcher", "application/json", `{}`, 404, "not_found", ""},
+		{"trailing slash", "POST", "/v1/snatch/", "application/json", `{}`, 404, "not_found", ""},
 		{"old route", "POST", "/download", "application/json", `{}`, 404, "not_found", ""},
-		{"unversioned route", "POST", "/snatcher", "application/json", `{}`, 404, "not_found", ""},
-		{"unsupported version", "POST", "/v2/snatcher", "application/json", `{}`, 404, "not_found", ""},
+		{"unversioned route", "POST", "/snatch", "application/json", `{}`, 404, "not_found", ""},
+		{"unsupported version", "POST", "/v2/snatch", "application/json", `{}`, 404, "not_found", ""},
 		{"unknown route", "GET", "/missing", "", "", 404, "not_found", ""},
-		{"content type", "POST", "/v1/snatcher", "text/plain", `{}`, 415, "invalid_content_type", ""},
-		{"null", "POST", "/v1/snatcher", "application/json", `null`, 400, "invalid_request", ""},
-		{"multiple values", "POST", "/v1/snatcher", "application/json", `{} {}`, 400, "invalid_request", ""},
-		{"unknown field", "POST", "/v1/snatcher", "application/json", `{"url":"https://example.com","extra":true}`, 400, "invalid_request", ""},
-		{"missing URL", "POST", "/v1/snatcher", "application/json", `{}`, 400, "invalid_url", ""},
-		{"credentials", "POST", "/v1/snatcher", "application/json", `{"url":"https://user:password@example.com"}`, 400, "invalid_url", ""},
-		{"oversized", "POST", "/v1/snatcher", "application/json", `{"url":"https://example.com/` + strings.Repeat("x", 16<<10) + `"}`, 413, "request_too_large", ""},
+		{"content type", "POST", "/v1/snatch", "text/plain", `{}`, 415, "invalid_content_type", ""},
+		{"null", "POST", "/v1/snatch", "application/json", `null`, 400, "invalid_request", ""},
+		{"multiple values", "POST", "/v1/snatch", "application/json", `{} {}`, 400, "invalid_request", ""},
+		{"unknown field", "POST", "/v1/snatch", "application/json", `{"url":"https://example.com","extra":true}`, 400, "invalid_request", ""},
+		{"missing URL", "POST", "/v1/snatch", "application/json", `{}`, 400, "invalid_url", ""},
+		{"credentials", "POST", "/v1/snatch", "application/json", `{"url":"https://user:password@example.com"}`, 400, "invalid_url", ""},
+		{"oversized", "POST", "/v1/snatch", "application/json", `{"url":"https://example.com/` + strings.Repeat("x", 16<<10) + `"}`, 413, "request_too_large", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -193,7 +195,7 @@ func TestDownloadOptions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":"https://www.youtube.com/watch?v=example"`+tt.fields+`}`))
+			r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://www.youtube.com/watch?v=example"`+tt.fields+`}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			NewHandler(c).ServeHTTP(w, r)
@@ -221,7 +223,7 @@ func TestInvalidOptions(t *testing.T) {
 		{`,"youtubeVideoCodec":"av1"`, "invalid_request"},
 	} {
 		t.Run(tt.fields, func(t *testing.T) {
-			r := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
+			r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			NewHandler(nil).ServeHTTP(w, r)
@@ -258,7 +260,7 @@ func TestAudioGallery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":"https://example.com/gallery","mode":"audio"}`))
+			r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://example.com/gallery","mode":"audio"}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			NewHandler(c).ServeHTTP(w, r)
@@ -331,7 +333,7 @@ func TestRewriteTunnelURL(t *testing.T) {
 		{"https://external.example/tunnel?id=1", "", "https://external.example/tunnel?id=1"},
 		{"http://media-service:9001/api/tunnel?id=1", "", "http://media-service:9001/api/tunnel?id=1"},
 	} {
-		r := httptest.NewRequest(http.MethodPost, "http://snatcher.example/v1/snatcher", nil)
+		r := httptest.NewRequest(http.MethodPost, "http://snatcher.example/v1/snatch", nil)
 		r.Header.Set("X-Forwarded-Proto", tt.proto)
 		got, err := rewriteTunnelURL(c, r, tt.raw)
 		if err != nil || got != tt.want {
@@ -430,7 +432,7 @@ func TestServiceInfo(t *testing.T) {
 			t.Errorf("metadata = %v, want %v", got, want)
 		}
 	}
-	resp, err := server.Client().Post(server.URL+"/v1/snatcher", "application/json", strings.NewReader(`{}`))
+	resp, err := server.Client().Post(server.URL+"/v1/snatch", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}

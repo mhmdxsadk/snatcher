@@ -75,7 +75,7 @@ func New(cfg Config) *Guard {
 
 func (g *Guard) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/"+version.API+"/snatcher" {
+		if r.URL.Path != "/"+version.API+"/snatch" {
 			next.ServeHTTP(w, r)
 			return
 		}

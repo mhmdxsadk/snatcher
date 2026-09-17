@@ -6,7 +6,7 @@ import (
 )
 
 func TestSecurityConfig(t *testing.T) {
-	base := map[string]string{"COBALT": "http://localhost:9000", "API_KEY": strings.Repeat("k", 32)}
+	base := map[string]string{"COBALT_API": "http://localhost:9000", "SNATCHER_API_KEY": strings.Repeat("k", 32)}
 	cfg, err := Load(func(k string) string { return base[k] })
 	if err != nil {
 		t.Fatal(err)
@@ -16,7 +16,8 @@ func TestSecurityConfig(t *testing.T) {
 	}
 	for _, tt := range []struct{ key, value string }{
 		{"LISTEN", "localhost"}, {"LISTEN", "localhost:"}, {"LISTEN", ":invalid"}, {"LISTEN", ":65536"},
-		{"API_KEY", ""}, {"API_KEY", "short"}, {"API_KEY", strings.Repeat(" ", 32)},
+		{"COBALT_API", ""}, {"COBALT_API", "not-a-url"},
+		{"SNATCHER_API_KEY", ""}, {"SNATCHER_API_KEY", "short"}, {"SNATCHER_API_KEY", strings.Repeat(" ", 32)},
 		{"RATE_LIMIT_PER_IP", "0"}, {"RATE_BURST_PER_IP", "-1"}, {"RATE_LIMIT_GLOBAL", "no"},
 		{"MAX_CONCURRENT", "10001"}, {"MAX_RATE_CLIENTS", "0"},
 		{"TRUSTED_PROXIES", "garbage"}, {"TRUSTED_PROXIES", "0.0.0.0/0"},

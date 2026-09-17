@@ -14,7 +14,7 @@ func fixture() *Guard {
 	return New(Config{APIKey: strings.Repeat("k", 32), IPPerMinute: 20, IPBurst: 5, GlobalPerMinute: 60, GlobalBurst: 10, MaxConcurrent: 2, MaxClients: 100})
 }
 func request(h http.Handler, ip, auth string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("POST", "/v1/snatcher", nil)
+	r := httptest.NewRequest("POST", "/v1/snatch", nil)
 	r.RemoteAddr = ip + ":1234"
 	if auth != "" {
 		r.Header.Set("X-API-Key", auth)
@@ -41,7 +41,7 @@ func TestAuthentication(t *testing.T) {
 	if w := request(h, "192.0.2.1", token()); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
-	r := httptest.NewRequest("POST", "/v1/snatcher", nil)
+	r := httptest.NewRequest("POST", "/v1/snatch", nil)
 	r.RemoteAddr = "192.0.2.1:1"
 	r.Header.Add("X-API-Key", token())
 	r.Header.Add("X-API-Key", token())
@@ -50,7 +50,7 @@ func TestAuthentication(t *testing.T) {
 	if w.Code != 401 {
 		t.Fatal(w.Code)
 	}
-	r = httptest.NewRequest("POST", "/v1/snatcher", nil)
+	r = httptest.NewRequest("POST", "/v1/snatch", nil)
 	r.RemoteAddr = "192.0.2.1:1"
 	r.Header.Set("Authorization", "Bearer "+token())
 	w = httptest.NewRecorder()
@@ -149,7 +149,7 @@ func TestClientIP(t *testing.T) {
 		{"[::ffff:192.0.2.1]:4", "", "192.0.2.1"},
 		{"127.0.0.1:4", "malformed", ""},
 	} {
-		r := httptest.NewRequest("POST", "/v1/snatcher", nil)
+		r := httptest.NewRequest("POST", "/v1/snatch", nil)
 		r.RemoteAddr = tt.peer
 		r.Header.Set("X-Forwarded-For", tt.xff)
 		ip, ok := g.clientIP(r)

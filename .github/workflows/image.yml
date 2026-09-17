@@ -35,15 +35,15 @@ jobs:
           docker run -d --name snatcher-test \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
             -p 127.0.0.1:8080:8080 \
-            -e COBALT=http://127.0.0.1:9000 \
-            -e API_KEY=ci-only-test-key-not-a-real-secret-00000000 \
+            -e COBALT_API=http://127.0.0.1:9000 \
+            -e SNATCHER_API_KEY=ci-only-test-key-not-a-real-secret-00000000 \
             snatcher:test
           trap 'docker logs snatcher-test; docker rm -f snatcher-test' EXIT
           curl --fail --silent --show-error --retry 10 --retry-connrefused \
             --retry-delay 1 --max-time 5 http://127.0.0.1:8080/health
           status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
             --max-time 5 -H 'Content-Type: application/json' \
-            --data '{"url":"https://example.com/video"}' http://127.0.0.1:8080/v1/snatcher)
+            --data '{"url":"https://example.com/video"}' http://127.0.0.1:8080/v1/snatch)
           test "$status" = 401
 
   image:

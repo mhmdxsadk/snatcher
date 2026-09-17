@@ -22,7 +22,7 @@ type Config struct {
 func Load(getenv func(string) string) (Config, error) {
 	c := Config{
 		ListenAddr: strings.TrimSpace(getenv("LISTEN")),
-		CobaltURL:  strings.TrimSpace(getenv("COBALT")),
+		CobaltURL:  strings.TrimSpace(getenv("COBALT_API")),
 	}
 	if c.ListenAddr == "" {
 		c.ListenAddr = "127.0.0.1:8080"
@@ -38,9 +38,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if err := ValidateCobaltURL(c.CobaltURL); err != nil {
 		return Config{}, err
 	}
-	c.Security.APIKey = getenv("API_KEY")
+	c.Security.APIKey = getenv("SNATCHER_API_KEY")
 	if len(c.Security.APIKey) < 32 || len(c.Security.APIKey) > 512 || strings.IndexFunc(c.Security.APIKey, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
-		return Config{}, errors.New("API_KEY must contain 32 to 512 printable ASCII characters without spaces")
+		return Config{}, errors.New("SNATCHER_API_KEY must contain 32 to 512 printable ASCII characters without spaces")
 	}
 	for _, setting := range []struct {
 		name              string
@@ -81,15 +81,15 @@ func Load(getenv func(string) string) (Config, error) {
 func ValidateCobaltURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return errors.New("COBALT must be an absolute HTTP(S) URL")
+		return errors.New("COBALT_API must be an absolute HTTP(S) URL")
 	}
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return errors.New("COBALT must not contain credentials, a query, or a fragment")
+		return errors.New("COBALT_API must not contain credentials, a query, or a fragment")
 	}
 	if port := u.Port(); port != "" || strings.HasSuffix(u.Host, ":") {
 		n, err := strconv.ParseUint(port, 10, 16)
 		if err != nil || n == 0 {
-			return errors.New("COBALT port must be an integer between 1 and 65535")
+			return errors.New("COBALT_API port must be an integer between 1 and 65535")
 		}
 	}
 	return nil

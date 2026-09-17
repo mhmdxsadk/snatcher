@@ -36,7 +36,7 @@ func NewHandler(c *client.Client) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	mux.HandleFunc("/"+version.API+"/snatcher", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/"+version.API+"/snatch", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use POST for this endpoint.")
