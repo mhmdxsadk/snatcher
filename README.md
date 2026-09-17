@@ -6,13 +6,21 @@ download the returned media, and save it to Photos or Files.
 ## Quick start
 
 Requires Docker Compose and a working Cobalt instance. Put [compose.yaml](compose.yaml)
-on your server and edit `COBALT` and `API_KEY` in its `environment` section.
-No `.env` file is needed.
+on your server and set `COBALT` and `API_KEY` in its `environment` section.
+
+<br>
 
 > [!WARNING]
 > Only use a Cobalt instance you host or have permission to use.
 
-Generate a key with `openssl rand -hex 32`.
+<br>
+
+Set `API_KEY` to a random string of at least 32 characters. For example:
+
+```sh
+openssl rand -hex 32
+```
+
 The Cobalt URL must be reachable from Snatcher.
 
 ```sh
