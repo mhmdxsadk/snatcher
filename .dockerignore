@@ -1,0 +1,7 @@
+# Only source files needed to compile the service enter the build context.
+**
+!go.mod
+!cmd/
+!cmd/**
+!internal/
+!internal/**

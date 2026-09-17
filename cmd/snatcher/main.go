@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"github.com/mhmdxsadk/snatcher/internal/api"
 	"github.com/mhmdxsadk/snatcher/internal/client"
 	"github.com/mhmdxsadk/snatcher/internal/config"
+	"github.com/mhmdxsadk/snatcher/internal/security"
 )
 
 func main() {
@@ -35,21 +37,27 @@ func run() error {
 	defer stop()
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.NewHandler(c),
+		Handler:           security.New(cfg.Security).Wrap(api.NewHandler(c)),
+		MaxHeaderBytes:    16 << 10,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      45 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
 	done := make(chan error, 1)
-	go func() { done <- server.ListenAndServe() }()
-	slog.Info("snatcher starting", "address", cfg.ListenAddr)
+	go func() { done <- server.Serve(listener) }()
+	slog.Info("snatcher starting", "address", listener.Addr().String())
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
 		stop()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Allow the 10-second request read and 30-second Cobalt timeout to finish.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			_ = server.Close()

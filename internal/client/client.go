@@ -42,25 +42,21 @@ type Response struct {
 	Picker        []PickerItem `json:"picker"`
 	AudioFilename string       `json:"audioFilename"`
 	// Audio is a URL for pickers and an object for local processing.
-	Audio   json.RawMessage `json:"audio"`
-	Type    string          `json:"type"`
-	Service string          `json:"service"`
-	Tunnel  []string        `json:"tunnel"`
-	Output  json.RawMessage `json:"output"`
-	IsHLS   bool            `json:"isHLS"`
-	Error   *APIError       `json:"error"`
+	Audio  json.RawMessage `json:"audio"`
+	Type   string          `json:"type"`
+	Tunnel []string        `json:"tunnel"`
+	Output json.RawMessage `json:"output"`
+	Error  *APIError       `json:"error"`
 }
 
 type PickerItem struct {
-	Type  string `json:"type"`
-	URL   string `json:"url"`
-	Thumb string `json:"thumb"`
+	Type string `json:"type"`
+	URL  string `json:"url"`
 }
 
 type APIError struct {
-	Code       string          `json:"code"`
-	Context    json.RawMessage `json:"context"`
-	HTTPStatus int             `json:"-"`
+	Code       string `json:"code"`
+	HTTPStatus int    `json:"-"`
 }
 
 func (e *APIError) Error() string { return fmt.Sprintf("cobalt: %s (HTTP %d)", e.Code, e.HTTPStatus) }
@@ -71,14 +67,35 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("cobalt: unexpected HTTP status %d", e.StatusCode)
 }
 
+// Options contains validated download preferences supplied by the API.
+type Options struct {
+	Quality     string
+	Mode        string
+	AudioFormat string
+}
+
 // Resolve asks Cobalt for media instructions. It does not download or process media.
 // Callers must handle local-processing before treating any result as downloadable.
-func (c *Client) Resolve(ctx context.Context, sourceURL string) (*Response, error) {
+func (c *Client) Resolve(ctx context.Context, sourceURL string, options Options) (*Response, error) {
 	body, err := json.Marshal(struct {
-		URL             string `json:"url"`
-		AlwaysProxy     bool   `json:"alwaysProxy"`
-		LocalProcessing string `json:"localProcessing"`
-	}{sourceURL, true, "disabled"})
+		URL                   string `json:"url"`
+		AlwaysProxy           bool   `json:"alwaysProxy"`
+		LocalProcessing       string `json:"localProcessing"`
+		VideoQuality          string `json:"videoQuality"`
+		DownloadMode          string `json:"downloadMode"`
+		AudioFormat           string `json:"audioFormat"`
+		AudioBitrate          string `json:"audioBitrate"`
+		YouTubeVideoCodec     string `json:"youtubeVideoCodec"`
+		YouTubeVideoContainer string `json:"youtubeVideoContainer"`
+		AllowH265             bool   `json:"allowH265"`
+	}{
+		URL: sourceURL, AlwaysProxy: true, LocalProcessing: "disabled",
+		VideoQuality: options.Quality, DownloadMode: options.Mode,
+		AudioFormat: options.AudioFormat, AudioBitrate: "128",
+		YouTubeVideoCodec: "h264", YouTubeVideoContainer: "mp4",
+		// Allow existing TikTok HEVC formats; this does not transcode media.
+		AllowH265: true,
+	})
 	if err != nil {
 		return nil, err
 	}

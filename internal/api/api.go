@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net"
@@ -45,9 +44,7 @@ func NewHandler(c *client.Client) http.Handler {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 		defer r.Body.Close()
-		var input *struct {
-			URL string `json:"url"`
-		}
+		var input *downloadRequest
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
 		err = decoder.Decode(&input)
@@ -77,7 +74,12 @@ func NewHandler(c *client.Client) http.Handler {
 			writeError(w, 400, "invalid_url", "Provide an absolute HTTP or HTTPS URL without credentials.")
 			return
 		}
-		result, err := c.Resolve(r.Context(), source)
+		options, err := input.options()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_options", err.Error())
+			return
+		}
+		result, err := c.Resolve(r.Context(), source, options)
 		if err != nil {
 			upstreamError(w, err)
 			return
@@ -86,10 +88,31 @@ func NewHandler(c *client.Client) http.Handler {
 			writeError(w, 422, "processing_required", "This media requires processing that Snatcher does not support yet.")
 			return
 		}
+		if options.Mode == "audio" && result.Status == "picker" {
+			var audioURL string
+			if len(result.Audio) == 0 || string(result.Audio) == "null" {
+				writeError(w, 422, "audio_unavailable", "This gallery has no downloadable audio.")
+				return
+			}
+			if err := json.Unmarshal(result.Audio, &audioURL); err != nil {
+				writeError(w, 502, "invalid_upstream_response", "The media service returned an unusable result.")
+				return
+			}
+			if audioURL == "" {
+				writeError(w, 422, "audio_unavailable", "This gallery has no downloadable audio.")
+				return
+			}
+			result = &client.Response{Status: "redirect", URL: audioURL, Filename: result.AudioFilename}
+		}
 		items, err := mediaItems(result)
 		if err != nil {
 			writeError(w, 502, "invalid_upstream_response", "The media service returned an unusable result.")
 			return
+		}
+		if options.Mode == "audio" {
+			for i := range items {
+				items[i].Type = "audio"
+			}
 		}
 		writeJSON(w, 200, struct {
 			Status string `json:"status"`
@@ -173,7 +196,7 @@ func mediaItems(result *client.Response) ([]Item, error) {
 			case "photo", "video", "gif":
 				items = append(items, Item{URL: entry.URL, Type: entry.Type})
 			default:
-				return nil, fmt.Errorf("unsupported picker type")
+				return nil, errors.New("unsupported picker type")
 			}
 		}
 	default:

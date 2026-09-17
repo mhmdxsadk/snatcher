@@ -1,0 +1,17 @@
+services:
+  snatcher:
+    image: ghcr.io/mhmdxsadk/snatcher:${SNATCHER_TAG:-latest}
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 50s
+    ports:
+      - "${SNATCHER_BIND:-127.0.0.1}:8080:8080/tcp"
+    env_file:
+      - .env
+    environment:
+      COBALT: "${COBALT:?Set COBALT to a URL reachable from the container}"
+      API_KEY: "${API_KEY:?Set API_KEY to a key of at least 32 characters}"

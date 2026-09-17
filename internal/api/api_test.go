@@ -43,7 +43,7 @@ func TestDownloadIntegration(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Error(err)
 				}
-				want := map[string]any{"url": "https://www.instagram.com/p/example/?img_index=2", "alwaysProxy": true, "localProcessing": "disabled"}
+				want := map[string]any{"url": "https://www.instagram.com/p/example/?img_index=2", "alwaysProxy": true, "localProcessing": "disabled", "videoQuality": "1080", "downloadMode": "auto", "audioFormat": "mp3", "audioBitrate": "128", "youtubeVideoCodec": "h264", "youtubeVideoContainer": "mp4", "allowH265": true}
 				if !reflect.DeepEqual(body, want) {
 					t.Errorf("upstream body = %#v", body)
 				}
@@ -146,5 +146,126 @@ func TestUpstreamTimeout(t *testing.T) {
 	upstreamError(w, context.DeadlineExceeded)
 	if w.Code != 504 || !strings.Contains(w.Body.String(), `"code":"upstream_timeout"`) {
 		t.Fatalf("unexpected timeout: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestDownloadOptions(t *testing.T) {
+	tests := []struct {
+		name, fields, quality, mode, format, filename, kind string
+	}{
+		{"720p", `,"quality":"720"`, "720", "auto", "mp3", "video.mp4", "video"},
+		{"1080p", `,"quality":"1080"`, "1080", "auto", "mp3", "video.mp4", "video"},
+		{"1440p", `,"quality":"1440"`, "1440", "auto", "mp3", "video.mp4", "video"},
+		{"4K silent", `,"quality":"2160","mode":"mute"`, "2160", "mute", "mp3", "video.mp4", "video"},
+		{"maximum", `,"quality":"max"`, "max", "auto", "mp3", "video.mp4", "video"},
+		{"MP3", `,"mode":"audio"`, "1080", "audio", "mp3", "audio.mp3", "audio"},
+		{"best audio", `,"mode":"audio","audioFormat":"best"`, "1080", "audio", "best", "audio.opus", "audio"},
+		{"empty defaults", `,"quality":"","mode":"","audioFormat":""`, "1080", "auto", "mp3", "video.mp4", "video"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				want := map[string]any{
+					"url": "https://www.youtube.com/watch?v=example", "alwaysProxy": true,
+					"localProcessing": "disabled", "videoQuality": tt.quality, "downloadMode": tt.mode,
+					"audioFormat": tt.format, "audioBitrate": "128", "youtubeVideoCodec": "h264", "youtubeVideoContainer": "mp4", "allowH265": true,
+				}
+				if !reflect.DeepEqual(body, want) {
+					t.Errorf("Cobalt request = %#v, want %#v", body, want)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "tunnel", "url": "https://media.example/file", "filename": tt.filename})
+			}))
+			defer upstream.Close()
+			c, err := client.New(upstream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest("POST", "/download", strings.NewReader(`{"url":"https://www.youtube.com/watch?v=example"`+tt.fields+`}`))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			NewHandler(c).ServeHTTP(w, r)
+			var body struct{ Items []Item }
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != 200 || len(body.Items) != 1 || body.Items[0].Type != tt.kind {
+				t.Fatalf("unexpected response: %d %s", w.Code, w.Body)
+			}
+		})
+	}
+}
+
+func TestInvalidOptions(t *testing.T) {
+	for _, tt := range []struct{ fields, code string }{
+		{`,"quality":"4k"`, "invalid_options"},
+		{`,"quality":1080`, "invalid_request"},
+		{`,"mode":"video"`, "invalid_options"},
+		{`,"mode":true`, "invalid_request"},
+		{`,"audioFormat":"wav"`, "invalid_options"},
+		{`,"audioFormat":[]`, "invalid_request"},
+		{`,"mode":"audio","quality":"typo"`, "invalid_options"},
+		{`,"mode":"mute","audioFormat":"typo"`, "invalid_options"},
+		{`,"youtubeVideoCodec":"av1"`, "invalid_request"},
+	} {
+		t.Run(tt.fields, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/download", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			NewHandler(nil).ServeHTTP(w, r)
+			var body struct{ Error struct{ Code string } }
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != 400 || body.Error.Code != tt.code {
+				t.Fatalf("unexpected response: %d %s", w.Code, w.Body)
+			}
+		})
+	}
+}
+
+func TestAudioGallery(t *testing.T) {
+	for _, tt := range []struct {
+		name, audio string
+		status      int
+		code        string
+	}{
+		{"background audio", `,"audio":"https://media.example/sound","audioFilename":"sound.m4a"`, 200, ""},
+		{"no audio", "", 422, "audio_unavailable"},
+		{"null audio", `,"audio":null`, 422, "audio_unavailable"},
+		{"empty audio", `,"audio":""`, 422, "audio_unavailable"},
+		{"malformed audio", `,"audio":{}`, 502, "invalid_upstream_response"},
+		{"invalid audio URL", `,"audio":"file:///audio"`, 502, "invalid_upstream_response"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"status":"picker","picker":[{"type":"photo","url":"https://media.example/photo"}]` + tt.audio + `}`))
+			}))
+			defer upstream.Close()
+			c, err := client.New(upstream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest("POST", "/download", strings.NewReader(`{"url":"https://example.com/gallery","mode":"audio"}`))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			NewHandler(c).ServeHTTP(w, r)
+			var body struct {
+				Items []Item
+				Error struct{ Code string }
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != tt.status || body.Error.Code != tt.code {
+				t.Fatalf("unexpected response: %d %s", w.Code, w.Body)
+			}
+			if tt.status == 200 && !reflect.DeepEqual(body.Items, []Item{{URL: "https://media.example/sound", Filename: "sound.m4a", Type: "audio"}}) {
+				t.Fatalf("unexpected audio: %s", w.Body)
+			}
+		})
 	}
 }
