@@ -18,10 +18,10 @@ docker compose up -d
 curl --fail http://127.0.0.1:8080/health
 ```
 
-The image must first be published by the repository's GitHub Actions workflow.
 The host port defaults to loopback. Replace `127.0.0.1` in `ports` with your
-server's Tailscale IP for tailnet access, or use an HTTPS reverse proxy for public access. Point
-your Shortcut at `/download` and send your key in the `X-API-Key` header.
+server's Tailscale IP for tailnet access, or use an HTTPS reverse proxy for
+public access. Point your Shortcut at `/download` and send your key in the
+`X-API-Key` header. See the wiki for the request format and networking details.
 
 Only `COBALT` and `API_KEY` are required. Add optional settings to `environment`
 only when you need to override the defaults.
