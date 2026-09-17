@@ -11,8 +11,10 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/mhmdxsadk/snatcher/internal/client"
+	"github.com/mhmdxsadk/snatcher/internal/version"
 )
 
 type Item struct {
@@ -27,40 +29,23 @@ func NewHandler(c *client.Client) http.Handler {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
-			writeError(
-				w,
-				http.StatusMethodNotAllowed,
-				"method_not_allowed",
-				"Use GET for this endpoint.",
-			)
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET for this endpoint.")
 			return
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/"+version.API+"/snatcher", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
-			writeError(
-				w,
-				http.StatusMethodNotAllowed,
-				"method_not_allowed",
-				"Use POST for this endpoint.",
-			)
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use POST for this endpoint.")
 			return
 		}
 
-		contentType, _, err := mime.ParseMediaType(
-			r.Header.Get("Content-Type"),
-		)
+		contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err != nil || contentType != "application/json" {
-			writeError(
-				w,
-				http.StatusUnsupportedMediaType,
-				"invalid_content_type",
-				"Send a JSON request body.",
-			)
+			writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "Send a JSON request body.")
 			return
 		}
 
@@ -93,19 +78,9 @@ func NewHandler(c *client.Client) http.Handler {
 			var limit *http.MaxBytesError
 
 			if errors.As(err, &limit) {
-				writeError(
-					w,
-					http.StatusRequestEntityTooLarge,
-					"request_too_large",
-					"The request body is too large.",
-				)
+				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "The request body is too large.")
 			} else {
-				writeError(
-					w,
-					http.StatusBadRequest,
-					"invalid_request",
-					"Send one JSON object containing a URL.",
-				)
+				writeError(w, http.StatusBadRequest, "invalid_request", "Send one JSON object containing a URL.")
 			}
 
 			return
@@ -113,23 +88,13 @@ func NewHandler(c *client.Client) http.Handler {
 
 		source, err := normalizeURL(input.URL)
 		if err != nil {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"invalid_url",
-				"Provide an absolute HTTP or HTTPS URL without credentials.",
-			)
+			writeError(w, http.StatusBadRequest, "invalid_url", "Provide an absolute HTTP or HTTPS URL without credentials.")
 			return
 		}
 
 		options, err := input.options()
 		if err != nil {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"invalid_options",
-				err.Error(),
-			)
+			writeError(w, http.StatusBadRequest, "invalid_options", err.Error())
 			return
 		}
 
@@ -140,46 +105,22 @@ func NewHandler(c *client.Client) http.Handler {
 		}
 
 		if result.Status == "local-processing" {
-			writeError(
-				w,
-				http.StatusUnprocessableEntity,
-				"processing_required",
-				"This media requires processing that Snatcher does not support yet.",
-			)
+			writeError(w, http.StatusUnprocessableEntity, "processing_required", "This media requires processing that Snatcher does not support yet.")
 			return
 		}
 
 		if options.Mode == "audio" && result.Status == "picker" {
 			var audioURL string
 
-			if len(result.Audio) == 0 ||
-				string(result.Audio) == "null" {
-				writeError(
-					w,
-					http.StatusUnprocessableEntity,
-					"audio_unavailable",
-					"This gallery has no downloadable audio.",
-				)
-				return
-			}
-
-			if err := json.Unmarshal(result.Audio, &audioURL); err != nil {
-				writeError(
-					w,
-					http.StatusBadGateway,
-					"invalid_upstream_response",
-					"The media service returned an unusable result.",
-				)
-				return
+			if len(result.Audio) != 0 {
+				if err := json.Unmarshal(result.Audio, &audioURL); err != nil {
+					writeError(w, http.StatusBadGateway, "invalid_upstream_response", "The media service returned an unusable result.")
+					return
+				}
 			}
 
 			if audioURL == "" {
-				writeError(
-					w,
-					http.StatusUnprocessableEntity,
-					"audio_unavailable",
-					"This gallery has no downloadable audio.",
-				)
+				writeError(w, http.StatusUnprocessableEntity, "audio_unavailable", "This gallery has no downloadable audio.")
 				return
 			}
 
@@ -192,35 +133,19 @@ func NewHandler(c *client.Client) http.Handler {
 
 		items, err := mediaItems(result)
 		if err != nil {
-			writeError(
-				w,
-				http.StatusBadGateway,
-				"invalid_upstream_response",
-				"The media service returned an unusable result.",
-			)
+			writeError(w, http.StatusBadGateway, "invalid_upstream_response", "The media service returned an unusable result.")
 			return
 		}
 
-		// Rewrite only Cobalt tunnel URLs so clients download through
-		// Snatcher instead of attempting to resolve the private Docker
-		// hostname "cobalt".
 		for i := range items {
-			rewritten, err := rewriteTunnelURL(r, items[i].URL)
+			rewritten, err := rewriteTunnelURL(c, r, items[i].URL)
 			if err != nil {
-				writeError(
-					w,
-					http.StatusBadGateway,
-					"invalid_upstream_response",
-					"The media service returned an unusable result.",
-				)
+				writeError(w, http.StatusBadGateway, "invalid_upstream_response", "The media service returned an unusable result.")
 				return
 			}
 
 			items[i].URL = rewritten
-		}
-
-		if options.Mode == "audio" {
-			for i := range items {
+			if options.Mode == "audio" {
 				items[i].Type = "audio"
 			}
 		}
@@ -234,59 +159,47 @@ func NewHandler(c *client.Client) http.Handler {
 		})
 	})
 
-	// Public endpoint for Cobalt's signed tunnel URLs.
-	//
-	// This is deliberately not a generic reverse proxy. The upstream host
-	// and path are fixed by client.Tunnel().
 	mux.HandleFunc("/tunnel", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
-			writeError(
-				w,
-				http.StatusMethodNotAllowed,
-				"method_not_allowed",
-				"Use GET for this endpoint.",
-			)
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET for this endpoint.")
 			return
 		}
 
-		query := r.URL.Query()
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_tunnel", "The download URL is invalid.")
+			return
+		}
 
-		// A Cobalt tunnel URL is expected to be signed and expiring.
-		// Require the core fields so /tunnel cannot be used as a generic
-		// request path to Cobalt.
+		// Cobalt validates the signature and expiry; reject incomplete URLs here.
 		for _, key := range []string{"id", "exp", "sig"} {
 			if query.Get(key) == "" {
-				writeError(
-					w,
-					http.StatusBadRequest,
-					"invalid_tunnel",
-					"The download URL is invalid.",
-				)
+				writeError(w, http.StatusBadRequest, "invalid_tunnel", "The download URL is invalid.")
 				return
 			}
 		}
 
-		resp, err := c.Tunnel(
-			r.Context(),
-			r.Method,
-			query,
-			r.Header.Get("Range"),
-		)
+		// Transfers can outlast the server's deadline for ordinary API responses.
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			panic(http.ErrAbortHandler)
+		}
+
+		resp, err := c.Tunnel(r.Context(), r.Method, query, r.Header.Get("Range"))
 		if err != nil {
 			upstreamError(w, err)
 			return
 		}
 		defer resp.Body.Close()
 
-		// Forward only headers useful for downloading/streaming media.
-		copyResponseHeader(w, resp, "Content-Type")
-		copyResponseHeader(w, resp, "Content-Length")
-		copyResponseHeader(w, resp, "Content-Disposition")
-		copyResponseHeader(w, resp, "Accept-Ranges")
-		copyResponseHeader(w, resp, "Content-Range")
-		copyResponseHeader(w, resp, "ETag")
-		copyResponseHeader(w, resp, "Last-Modified")
+		for _, name := range []string{
+			"Content-Type", "Content-Length", "Content-Disposition", "Accept-Ranges",
+			"Content-Range", "Content-Encoding", "ETag", "Last-Modified",
+		} {
+			if value := resp.Header.Get(name); value != "" {
+				w.Header().Set(name, value)
+			}
+		}
 
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -297,51 +210,49 @@ func NewHandler(c *client.Client) http.Handler {
 			return
 		}
 
-		// Stream directly from Cobalt to the client. The media is not
-		// buffered into Snatcher's memory.
-		_, _ = io.Copy(w, resp.Body)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			// Abort the response so a truncated download cannot appear complete.
+			panic(http.ErrAbortHandler)
+		}
+	})
+
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET or HEAD for this endpoint.")
+			return
+		}
+		writeJSON(w, http.StatusOK, struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			API     string `json:"api"`
+		}{Name: "Snatcher", Version: version.Release, API: version.API})
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(
-			w,
-			http.StatusNotFound,
-			"not_found",
-			"Endpoint not found.",
-		)
+		writeError(w, http.StatusNotFound, "not_found", "Endpoint not found.")
 	})
 
 	return mux
 }
 
-// rewriteTunnelURL converts Cobalt's private Docker tunnel URL:
-//
-//	http://cobalt:9000/tunnel?...
-//
-// into the public Snatcher URL:
-//
-//	https://snatcher.alalawi.me/tunnel?...
-//
-// The public scheme and host are derived from the original request. Cloudflare
-// supplies X-Forwarded-Proto when proxying the request.
-func rewriteTunnelURL(r *http.Request, raw string) (string, error) {
+// rewriteTunnelURL exposes configured Cobalt tunnels through Snatcher.
+func rewriteTunnelURL(c *client.Client, r *http.Request, raw string) (string, error) {
 	u, err := parseURL(raw)
 	if err != nil {
 		return "", err
 	}
 
-	// Leave non-Cobalt URLs alone. This matters for Cobalt redirect responses
-	// that point directly to an external media host.
-	if !strings.EqualFold(u.Hostname(), "cobalt") ||
-		u.Path != "/tunnel" {
+	if !c.IsTunnelURL(u) {
 		return raw, nil
 	}
 
-	scheme := "https"
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
 
-	if forwarded := strings.TrimSpace(
-		r.Header.Get("X-Forwarded-Proto"),
-	); forwarded != "" {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwarded != "" {
 		// X-Forwarded-Proto can theoretically contain multiple values.
 		if i := strings.IndexByte(forwarded, ','); i >= 0 {
 			forwarded = forwarded[:i]
@@ -366,16 +277,6 @@ func rewriteTunnelURL(r *http.Request, raw string) (string, error) {
 	}
 
 	return public.String(), nil
-}
-
-func copyResponseHeader(
-	w http.ResponseWriter,
-	resp *http.Response,
-	name string,
-) {
-	if value := resp.Header.Get(name); value != "" {
-		w.Header().Set(name, value)
-	}
 }
 
 func normalizeURL(raw string) (string, error) {
@@ -466,9 +367,7 @@ func mediaItems(result *client.Response) ([]Item, error) {
 		filename := result.Filename
 
 		if filename != "" {
-			filename = path.Base(
-				strings.ReplaceAll(filename, "\\", "/"),
-			)
+			filename = path.Base(strings.ReplaceAll(filename, "\\", "/"))
 		}
 
 		kind := mediaType(filename)
@@ -548,65 +447,27 @@ func upstreamError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) ||
 		(errors.As(err, &network) && network.Timeout()):
-		writeError(
-			w,
-			http.StatusGatewayTimeout,
-			"upstream_timeout",
-			"The media service took too long to respond.",
-		)
+		writeError(w, http.StatusGatewayTimeout, "upstream_timeout", "The media service took too long to respond.")
 
 	case errors.As(err, &apiErr):
 		if apiErr.HTTPStatus == http.StatusTooManyRequests {
-			writeError(
-				w,
-				http.StatusServiceUnavailable,
-				"upstream_busy",
-				"The media service is busy. Try again later.",
-			)
-		} else if strings.HasSuffix(
-			apiErr.Code,
-			"api.fetch.empty",
-		) {
-			writeError(
-				w,
-				http.StatusUnprocessableEntity,
-				"media_unavailable",
-				"The media service could not retrieve this post.",
-			)
+			writeError(w, http.StatusServiceUnavailable, "upstream_busy", "The media service is busy. Try again later.")
+		} else if strings.HasSuffix(apiErr.Code, "api.fetch.empty") {
+			writeError(w, http.StatusUnprocessableEntity, "media_unavailable", "The media service could not retrieve this post.")
 		} else {
-			writeError(
-				w,
-				http.StatusBadGateway,
-				"upstream_error",
-				"The media service could not resolve this URL.",
-			)
+			writeError(w, http.StatusBadGateway, "upstream_error", "The media service could not resolve this URL.")
 		}
 
 	case errors.As(err, &httpErr) &&
 		httpErr.StatusCode == http.StatusTooManyRequests:
-		writeError(
-			w,
-			http.StatusServiceUnavailable,
-			"upstream_busy",
-			"The media service is busy. Try again later.",
-		)
+		writeError(w, http.StatusServiceUnavailable, "upstream_busy", "The media service is busy. Try again later.")
 
 	default:
-		writeError(
-			w,
-			http.StatusBadGateway,
-			"upstream_error",
-			"The media service could not complete the request.",
-		)
+		writeError(w, http.StatusBadGateway, "upstream_error", "The media service could not complete the request.")
 	}
 }
 
-func writeError(
-	w http.ResponseWriter,
-	status int,
-	code string,
-	message string,
-) {
+func writeError(w http.ResponseWriter, status int, code string, message string) {
 	writeJSON(w, status, map[string]any{
 		"status": "error",
 		"error": map[string]string{

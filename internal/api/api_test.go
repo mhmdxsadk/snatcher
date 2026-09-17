@@ -1,18 +1,23 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mhmdxsadk/snatcher/internal/client"
+	"github.com/mhmdxsadk/snatcher/internal/security"
 )
 
-func TestDownloadIntegration(t *testing.T) {
+func TestSnatcherIntegration(t *testing.T) {
 	tests := []struct {
 		name, response             string
 		upstreamStatus, wantStatus int
@@ -55,7 +60,7 @@ func TestDownloadIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req := httptest.NewRequest("POST", "/download", strings.NewReader(`{"url":" https://www.instagram.com/p/example/?igsh=tracking&img_index=2 "}`))
+			req := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":" https://www.instagram.com/p/example/?igsh=tracking&img_index=2 "}`))
 			req.Header.Set("Content-Type", "application/json; charset=utf-8")
 			w := httptest.NewRecorder()
 			NewHandler(c).ServeHTTP(w, req)
@@ -86,16 +91,20 @@ func TestRequestValidation(t *testing.T) {
 		status                                int
 		code, allow                           string
 	}{
-		{"method", "GET", "/download", "", "", 405, "method_not_allowed", "POST"},
+		{"method", "GET", "/v1/snatcher", "", "", 405, "method_not_allowed", "POST"},
 		{"health method", "POST", "/health", "", "", 405, "method_not_allowed", "GET, HEAD"},
+		{"root method", "POST", "/", "", "", 405, "method_not_allowed", "GET, HEAD"},
+		{"old route", "POST", "/download", "application/json", `{}`, 404, "not_found", ""},
+		{"unversioned route", "POST", "/snatcher", "application/json", `{}`, 404, "not_found", ""},
+		{"unsupported version", "POST", "/v2/snatcher", "application/json", `{}`, 404, "not_found", ""},
 		{"unknown route", "GET", "/missing", "", "", 404, "not_found", ""},
-		{"content type", "POST", "/download", "text/plain", `{}`, 415, "invalid_content_type", ""},
-		{"null", "POST", "/download", "application/json", `null`, 400, "invalid_request", ""},
-		{"multiple values", "POST", "/download", "application/json", `{} {}`, 400, "invalid_request", ""},
-		{"unknown field", "POST", "/download", "application/json", `{"url":"https://example.com","extra":true}`, 400, "invalid_request", ""},
-		{"missing URL", "POST", "/download", "application/json", `{}`, 400, "invalid_url", ""},
-		{"credentials", "POST", "/download", "application/json", `{"url":"https://user:password@example.com"}`, 400, "invalid_url", ""},
-		{"oversized", "POST", "/download", "application/json", `{"url":"https://example.com/` + strings.Repeat("x", 16<<10) + `"}`, 413, "request_too_large", ""},
+		{"content type", "POST", "/v1/snatcher", "text/plain", `{}`, 415, "invalid_content_type", ""},
+		{"null", "POST", "/v1/snatcher", "application/json", `null`, 400, "invalid_request", ""},
+		{"multiple values", "POST", "/v1/snatcher", "application/json", `{} {}`, 400, "invalid_request", ""},
+		{"unknown field", "POST", "/v1/snatcher", "application/json", `{"url":"https://example.com","extra":true}`, 400, "invalid_request", ""},
+		{"missing URL", "POST", "/v1/snatcher", "application/json", `{}`, 400, "invalid_url", ""},
+		{"credentials", "POST", "/v1/snatcher", "application/json", `{"url":"https://user:password@example.com"}`, 400, "invalid_url", ""},
+		{"oversized", "POST", "/v1/snatcher", "application/json", `{"url":"https://example.com/` + strings.Repeat("x", 16<<10) + `"}`, 413, "request_too_large", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -184,7 +193,7 @@ func TestDownloadOptions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest("POST", "/download", strings.NewReader(`{"url":"https://www.youtube.com/watch?v=example"`+tt.fields+`}`))
+			r := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":"https://www.youtube.com/watch?v=example"`+tt.fields+`}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			NewHandler(c).ServeHTTP(w, r)
@@ -212,7 +221,7 @@ func TestInvalidOptions(t *testing.T) {
 		{`,"youtubeVideoCodec":"av1"`, "invalid_request"},
 	} {
 		t.Run(tt.fields, func(t *testing.T) {
-			r := httptest.NewRequest("POST", "/download", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
+			r := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			NewHandler(nil).ServeHTTP(w, r)
@@ -249,7 +258,7 @@ func TestAudioGallery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest("POST", "/download", strings.NewReader(`{"url":"https://example.com/gallery","mode":"audio"}`))
+			r := httptest.NewRequest("POST", "/v1/snatcher", strings.NewReader(`{"url":"https://example.com/gallery","mode":"audio"}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			NewHandler(c).ServeHTTP(w, r)
@@ -267,5 +276,191 @@ func TestAudioGallery(t *testing.T) {
 				t.Fatalf("unexpected audio: %s", w.Body)
 			}
 		})
+	}
+}
+
+func TestTunnelProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tunnel" || r.URL.Query().Get("sig") != "a+b" {
+			t.Errorf("unexpected upstream URL: %s", r.URL)
+		}
+		if r.Header.Get("Range") != "bytes=0-3" {
+			t.Errorf("missing range: %v", r.Header)
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Range", "bytes 0-3/10")
+		w.Header().Set("Set-Cookie", "private=value")
+		w.WriteHeader(http.StatusPartialContent)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write([]byte("data"))
+		}
+	}))
+	defer upstream.Close()
+	c, err := client.New(upstream.URL + "/api/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			r := httptest.NewRequest(method, "/tunnel?id=1&exp=2&sig=a%2Bb", nil)
+			r.Header.Set("Range", "bytes=0-3")
+			w := httptest.NewRecorder()
+			NewHandler(c).ServeHTTP(w, r)
+			if w.Code != http.StatusPartialContent || w.Header().Get("Content-Range") != "bytes 0-3/10" || w.Header().Get("Set-Cookie") != "" {
+				t.Fatalf("unexpected response: %d %v", w.Code, w.Header())
+			}
+			want := "data"
+			if method == http.MethodHead {
+				want = ""
+			}
+			if w.Body.String() != want {
+				t.Fatalf("body = %q, want %q", w.Body.String(), want)
+			}
+		})
+	}
+}
+
+func TestRewriteTunnelURL(t *testing.T) {
+	c, err := client.New("http://media-service:9000/api/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct{ raw, proto, want string }{
+		{"http://media-service:9000/api/tunnel?id=1&sig=a%2Bb", "", "http://snatcher.example/tunnel?id=1&sig=a%2Bb"},
+		{"http://media-service:9000/api/tunnel?id=1", "https", "https://snatcher.example/tunnel?id=1"},
+		{"https://external.example/tunnel?id=1", "", "https://external.example/tunnel?id=1"},
+		{"http://media-service:9001/api/tunnel?id=1", "", "http://media-service:9001/api/tunnel?id=1"},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "http://snatcher.example/v1/snatcher", nil)
+		r.Header.Set("X-Forwarded-Proto", tt.proto)
+		got, err := rewriteTunnelURL(c, r, tt.raw)
+		if err != nil || got != tt.want {
+			t.Errorf("rewrite %q = %q, %v; want %q", tt.raw, got, err, tt.want)
+		}
+	}
+}
+
+func TestInvalidTunnelRequest(t *testing.T) {
+	for _, target := range []string{"/tunnel", "/tunnel?id=1&exp=2", "/tunnel?id=1&exp=2&sig=x&bad=%zz"} {
+		w := httptest.NewRecorder()
+		NewHandler(nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d", target, w.Code)
+		}
+	}
+}
+
+func TestTruncatedTunnelAbortsResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = w.Write([]byte("partial"))
+	}))
+	defer upstream.Close()
+	c, err := client.New(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Errorf("panic = %v, want http.ErrAbortHandler", got)
+		}
+	}()
+	NewHandler(c).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
+}
+
+func TestTunnelOutlastsServerWriteTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte("media"))
+	}))
+	defer upstream.Close()
+	c, err := client.New(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(NewHandler(c))
+	server.Config.WriteTimeout = 20 * time.Millisecond
+	server.Start()
+	defer server.Close()
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Get(server.URL + "/tunnel?id=1&exp=2&sig=x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != "media" || resp.StatusCode != http.StatusOK {
+		t.Fatalf("response = %d %q, %v", resp.StatusCode, body, err)
+	}
+}
+
+func TestServiceInfo(t *testing.T) {
+	guard := security.New(security.Config{
+		APIKey: strings.Repeat("k", 32), IPPerMinute: 20, IPBurst: 5,
+		GlobalPerMinute: 60, GlobalBurst: 10, MaxConcurrent: 2, MaxClients: 100,
+	})
+	server := httptest.NewServer(guard.Wrap(NewHandler(nil)))
+	defer server.Close()
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		r, err := http.NewRequest(method, server.URL+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := server.Client().Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("%s: status = %d, body = %q, error = %v", method, resp.StatusCode, body, err)
+		}
+		if method == http.MethodHead {
+			if len(body) != 0 {
+				t.Errorf("HEAD returned a body: %q", body)
+			}
+			continue
+		}
+		var got map[string]string
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{"name": "Snatcher", "version": "0.1.0", "api": "v1"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("metadata = %v, want %v", got, want)
+		}
+	}
+	resp, err := server.Client().Post(server.URL+"/v1/snatcher", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated resolution returned %d", resp.StatusCode)
+	}
+}
+
+func TestTunnelPreservesContentEncoding(t *testing.T) {
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write([]byte("media")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(compressed.Bytes())
+	}))
+	defer upstream.Close()
+	c, err := client.New(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	NewHandler(c).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
+	if w.Code != http.StatusOK || w.Header().Get("Content-Encoding") != "gzip" || !bytes.Equal(w.Body.Bytes(), compressed.Bytes()) {
+		t.Fatalf("encoded response was altered: status=%d headers=%v", w.Code, w.Header())
 	}
 }

@@ -1,5 +1,5 @@
 // Package security protects API resolution requests. Limits are process-local;
-// file transfers go directly to Cobalt and require separate upstream controls.
+// tunnel transfers rely on Cobalt signatures and separate upstream controls.
 package security
 
 import (
@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mhmdxsadk/snatcher/internal/version"
 )
 
 type Config struct {
@@ -73,7 +75,7 @@ func New(cfg Config) *Guard {
 
 func (g *Guard) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/download" {
+		if r.URL.Path != "/"+version.API+"/snatcher" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -20,11 +20,14 @@ curl --fail http://127.0.0.1:8080/health
 
 The host port defaults to loopback. Replace `127.0.0.1` in `ports` with your
 server's Tailscale IP for tailnet access, or use an HTTPS reverse proxy for
-public access. Point your Shortcut at `/download` and send your key in the
+public access. Point your Shortcut at `/v1/snatcher` and send your key in the
 `X-API-Key` header. See the wiki for the request format and networking details.
 
 Only `COBALT` and `API_KEY` are required. Add optional settings to `environment`
 only when you need to override the defaults.
+
+`GET /` returns the service name, release version, and API version.
+Cobalt tunnel downloads are streamed through Snatcher at `/tunnel`.
 
 ## Documentation
 

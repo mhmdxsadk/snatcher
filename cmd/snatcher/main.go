@@ -15,6 +15,7 @@ import (
 	"github.com/mhmdxsadk/snatcher/internal/client"
 	"github.com/mhmdxsadk/snatcher/internal/config"
 	"github.com/mhmdxsadk/snatcher/internal/security"
+	"github.com/mhmdxsadk/snatcher/internal/version"
 )
 
 func main() {
@@ -50,13 +51,13 @@ func run() error {
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
-	slog.Info("snatcher starting", "address", listener.Addr().String())
+	slog.Info("snatcher starting", "version", version.Release, "api", version.API, "address", listener.Addr().String())
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
 		stop()
-		// Allow the 10-second request read and 30-second Cobalt timeout to finish.
+		// Give active requests and transfers up to 45 seconds to finish.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {

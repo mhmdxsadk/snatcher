@@ -92,3 +92,58 @@ func TestCancellation(t *testing.T) {
 		t.Fatal("upstream request did not stop after cancellation")
 	}
 }
+
+func TestTunnelRedirectRejected(t *testing.T) {
+	var followed atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed.Store(true)
+	}))
+	defer destination.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+	c, err := New(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Tunnel(context.Background(), http.MethodGet, nil, "")
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("expected redirect error, got %v", err)
+	}
+	if followed.Load() {
+		t.Fatal("followed a tunnel redirect")
+	}
+}
+
+func TestTunnelCancellation(t *testing.T) {
+	canceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer upstream.Close()
+	c, err := New(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := c.Tunnel(ctx, http.MethodGet, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	cancel()
+	if _, err := io.ReadAll(resp.Body); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream transfer did not stop after cancellation")
+	}
+}
