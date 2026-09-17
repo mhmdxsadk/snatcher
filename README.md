@@ -15,23 +15,26 @@ on your server and set `COBALT` and `API_KEY` in its `environment` section.
 
 <br>
 
-Set `API_KEY` to a random string of at least 32 characters. For example:
+Set `API_KEY` to a random string of at least 32 characters. You can generate one with:
 
 ```sh
 openssl rand -hex 32
 ```
 
-The Cobalt URL must be reachable from Snatcher.
+The Cobalt API must be reachable from the Snatcher container.
 
 ```sh
 docker compose up -d
 curl --fail http://127.0.0.1:8080/health
 ```
 
-The host port defaults to loopback. Replace `127.0.0.1` in `ports` with your
-server's Tailscale IP for tailnet access, or use an HTTPS reverse proxy for
-public access. Point your Shortcut at `https://YOUR_SNATCHER_HOST/v1/snatcher`.
-For example:
+Keep `127.0.0.1` in `ports` for host-only access. For public access, use
+Cloudflare Tunnel (recommended) or another HTTPS reverse proxy. The port mapping
+can stay unchanged when the tunnel or proxy connects to Snatcher through the host.
+
+For direct tailnet access, replace `127.0.0.1` with your server's Tailscale IP.
+
+Point your Shortcut at `https://YOUR_SNATCHER_HOST/v1/snatcher`. For example:
 
 ```sh
 curl --fail-with-body 'https://YOUR_SNATCHER_HOST/v1/snatcher' \
