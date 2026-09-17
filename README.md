@@ -34,10 +34,11 @@ can stay unchanged when the tunnel or proxy connects to Snatcher through the hos
 
 For direct tailnet access, replace `127.0.0.1` with your server's Tailscale IP.
 
-Point your Shortcut at `https://YOUR_SNATCHER_HOST/v1/snatcher`. For example:
+Point your Shortcut at `https://snatcher.example.com/v1/snatcher`.
+Replace `snatcher.example.com` with your domain.
 
 ```sh
-curl --fail-with-body 'https://YOUR_SNATCHER_HOST/v1/snatcher' \
+curl --fail-with-body 'https://snatcher.example.com/v1/snatcher' \
   -H 'Content-Type: application/json' \
   -H 'X-API-Key: YOUR_API_KEY' \
   --data '{"url":"https://www.instagram.com/reel/POST_ID/"}'
