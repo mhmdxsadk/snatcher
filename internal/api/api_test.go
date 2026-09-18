@@ -322,6 +322,79 @@ func TestTunnelProxy(t *testing.T) {
 	}
 }
 
+func TestTunnelRejectsEmptyDownloads(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		status        int
+		chunked       bool
+		contentLength string
+		wantCode      string
+	}{
+		{"empty", http.StatusOK, false, "0", "empty_download"},
+		{"empty chunked", http.StatusOK, true, "", "empty_download"},
+		{"empty range", http.StatusPartialContent, true, "", "empty_download"},
+		{"no content", http.StatusNoContent, false, "", "empty_download"},
+		{"failed before first byte", http.StatusOK, false, "100", "upstream_error"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "video/mp4")
+				w.Header().Set("Content-Disposition", `attachment; filename="video.mp4"`)
+				if tt.contentLength != "" {
+					w.Header().Set("Content-Length", tt.contentLength)
+				}
+				w.WriteHeader(tt.status)
+				if tt.chunked {
+					w.(http.Flusher).Flush()
+				}
+			}))
+			defer upstream.Close()
+			c, err := client.New(upstream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			NewHandler(c).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
+			if w.Code != http.StatusBadGateway || w.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf("response = %d %v %s", w.Code, w.Header(), w.Body.String())
+			}
+			for _, name := range []string{"Content-Disposition", "Content-Length", "Content-Range"} {
+				if w.Header().Get(name) != "" {
+					t.Errorf("download header %s leaked into error", name)
+				}
+			}
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Error.Code != tt.wantCode {
+				t.Fatalf("error = %s, want %s; decode: %v", w.Body.String(), tt.wantCode, err)
+			}
+		})
+	}
+}
+
+func TestTunnelPreservesBody(t *testing.T) {
+	for _, body := range []string{"x", "complete media bytes"} {
+		t.Run(body, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer upstream.Close()
+			c, err := client.New(upstream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			NewHandler(c).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
+			if w.Code != http.StatusOK || w.Body.String() != body {
+				t.Fatalf("response = %d %q, want 200 %q", w.Code, w.Body.String(), body)
+			}
+		})
+	}
+}
+
 func TestRewriteTunnelURL(t *testing.T) {
 	c, err := client.New("http://media-service:9000/api/")
 	if err != nil {

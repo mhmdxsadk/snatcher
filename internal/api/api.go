@@ -192,6 +192,22 @@ func NewHandler(c *client.Client) http.Handler {
 		}
 		defer resp.Body.Close()
 
+		// Cobalt can send successful headers before its media fetch fails. Wait
+		// for actual data before committing download headers to the client.
+		var firstByte [1]byte
+		var prefix []byte
+		if r.Method == http.MethodGet && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if _, err := io.ReadFull(resp.Body, firstByte[:]); err != nil {
+				if errors.Is(err, io.EOF) {
+					writeError(w, http.StatusBadGateway, "empty_download", "The media service returned an empty download. Try again later or check the Cobalt instance.")
+				} else {
+					upstreamError(w, err)
+				}
+				return
+			}
+			prefix = firstByte[:]
+		}
+
 		for _, name := range []string{
 			"Content-Type", "Content-Length", "Content-Disposition", "Accept-Ranges",
 			"Content-Range", "Content-Encoding", "ETag", "Last-Modified",
@@ -208,6 +224,12 @@ func NewHandler(c *client.Client) http.Handler {
 
 		if r.Method == http.MethodHead {
 			return
+		}
+
+		if len(prefix) > 0 {
+			if _, err := w.Write(prefix); err != nil {
+				panic(http.ErrAbortHandler)
+			}
 		}
 
 		if _, err := io.Copy(w, resp.Body); err != nil {
