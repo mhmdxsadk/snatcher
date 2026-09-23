@@ -16,7 +16,10 @@ FROM node:26-bookworm-slim
 ARG YTDLP_VERSION=2026.8.19
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ffmpeg ca-certificates \
     && python3 -m venv /opt/yt-dlp \
-    && /opt/yt-dlp/bin/pip install --no-cache-dir "yt-dlp[default]==${YTDLP_VERSION}" \
+    && /opt/yt-dlp/bin/pip install --no-cache-dir "yt-dlp[default,curl-cffi]==${YTDLP_VERSION}" \
+    && /opt/yt-dlp/bin/yt-dlp --ignore-config --list-impersonate-targets > /tmp/impersonate-targets \
+    && grep -Eq 'curl_cffi$' /tmp/impersonate-targets \
+    && rm /tmp/impersonate-targets \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH="/opt/yt-dlp/bin:${PATH}" HOME=/tmp
 
