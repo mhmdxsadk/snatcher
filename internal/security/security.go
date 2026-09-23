@@ -79,6 +79,14 @@ func (g *Guard) Wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Only the immediate trusted proxy may describe the original scheme.
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		peer, err := netip.ParseAddr(host)
+		if err != nil || !g.trusted(peer.Unmap()) {
+			r.Header.Del("X-Forwarded-Proto")
+		} else if proto := r.Header.Get("X-Forwarded-Proto"); proto != "http" && proto != "https" {
+			r.Header.Del("X-Forwarded-Proto")
+		}
 		ip, ok := g.clientIP(r)
 		if !ok {
 			reject(w, 400, "invalid_client", "Unable to determine client address.", 0)

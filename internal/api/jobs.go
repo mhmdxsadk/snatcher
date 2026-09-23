@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -33,8 +34,18 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 		}{Job: job}
 		if job.Status == download.StatusCompleted {
 			expiry := strconv.FormatInt(job.Expires.Unix(), 10)
-			path := "/download/" + job.ID + "?exp=" + expiry + "&sig=" + downloadSignature(key, job.ID, expiry)
-			response.Items = []Item{{URL: path, Filename: job.Filename, Type: job.MediaType}}
+			scheme := "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+			// The security middleware removes untrusted or invalid forwarded schemes.
+			if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" || proto == "http" {
+				scheme = proto
+			}
+			link := url.URL{Scheme: scheme, Host: r.Host, Path: "/download/" + job.ID}
+			query := url.Values{"exp": {expiry}, "sig": {downloadSignature(key, job.ID, expiry)}}
+			link.RawQuery = query.Encode()
+			response.Items = []Item{{URL: link.String(), Filename: job.Filename, Type: job.MediaType}}
 		}
 		writeJSON(w, http.StatusOK, response)
 	})

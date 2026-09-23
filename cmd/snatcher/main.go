@@ -35,7 +35,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{"ffmpeg", "node"} {
+	for _, name := range []string{"ffmpeg", "ffprobe", "node"} {
 		if _, err := exec.LookPath(name); err != nil {
 			return err
 		}

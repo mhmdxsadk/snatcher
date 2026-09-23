@@ -206,3 +206,36 @@ func TestJobRoutesRequireAuthentication(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardedSchemeTrust(t *testing.T) {
+	for _, tt := range []struct {
+		name, proto, want string
+		trusted           bool
+	}{
+		{"untrusted", "https", "", false},
+		{"trusted", "https", "https", true},
+		{"invalid", "javascript", "", true},
+		{"ambiguous", "https, http", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			g := fixture()
+			if tt.trusted {
+				g.cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
+			}
+			r := httptest.NewRequest("GET", "/v1/jobs/test", nil)
+			r.RemoteAddr = "192.0.2.1:1234"
+			r.Header.Set("X-API-Key", token())
+			r.Header.Set("X-Forwarded-Proto", tt.proto)
+			w := httptest.NewRecorder()
+			g.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("X-Forwarded-Proto"); got != tt.want {
+					t.Fatalf("got %q want %q", got, tt.want)
+				}
+				w.WriteHeader(200)
+			})).ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Fatal(w.Code)
+			}
+		})
+	}
+}

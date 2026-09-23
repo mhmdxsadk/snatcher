@@ -6,10 +6,8 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -21,7 +19,7 @@ func arguments(r Request, dir string) []string {
 		format = "bv*[height<=?" + r.Quality + "]+ba/b[height<=?" + r.Quality + "]"
 	}
 	if r.Mode == "mute" {
-		format = "bv"
+		format = "bv*"
 		if r.Quality != "max" {
 			format += "[height<=?" + r.Quality + "]"
 		}
@@ -30,7 +28,7 @@ func arguments(r Request, dir string) []string {
 	if r.Mode == "audio" {
 		args = append(args, "-f", "ba/b", "-x", "--audio-format", r.AudioFormat)
 	} else {
-		args = append(args, "-f", format)
+		args = append(args, "-f", format, "-S", "vcodec:h264,acodec:aac")
 	}
 	return append(args, "--", r.URL)
 }
@@ -47,10 +45,7 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 func (y YTDLP) Run(ctx context.Context, r Request, dir string) (string, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, y.Binary, arguments(r, dir)...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 5 * time.Second
+	cmd := mediaCommand(ctx, y.Binary, arguments(r, dir)...)
 	var out boundedOutput
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
@@ -81,12 +76,10 @@ func (y YTDLP) Run(ctx context.Context, r Request, dir string) (string, error) {
 			}
 		}
 	}()
+	defer func() { cancel(); <-done }()
 	err := cmd.Run()
-	contextErr := ctx.Err()
-	cancel()
-	<-done
-	if contextErr != nil {
-		return "", contextErr
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
 	if err != nil {
 		return "", err
@@ -96,5 +89,13 @@ func (y YTDLP) Run(ctx context.Context, r Request, dir string) (string, error) {
 	if len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &path) != nil {
 		return "", errors.New("invalid downloader output")
 	}
-	return filepath.Clean(path), nil
+	path = filepath.Clean(path)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || filepath.Dir(path) != dir {
+		return "", errors.New("invalid downloader path")
+	}
+	if r.Mode != "audio" {
+		return compatibleVideo(ctx, path, r.Mode == "mute")
+	}
+	return path, nil
 }

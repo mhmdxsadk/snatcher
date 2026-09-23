@@ -52,6 +52,20 @@ func TestDownloadJobLifecycle(t *testing.T) {
 		t.Fatalf("%s", w.Body)
 	}
 	link := result.Items[0].URL
+	if !strings.HasPrefix(link, "http://example.com/download/") {
+		t.Fatalf("expected absolute download URL: %s", link)
+	}
+	for _, origin := range []string{"https://snatcher.example", "http://localhost:8080", "http://[::1]:8080"} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest("GET", origin+location, nil))
+		var got struct{ Items []Item }
+		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Items) != 1 || !strings.HasPrefix(got.Items[0].URL, origin+"/download/") {
+			t.Fatalf("incorrect origin: %s", response.Body)
+		}
+	}
 	for _, method := range []string{"GET", "HEAD"} {
 		w = httptest.NewRecorder()
 		r = httptest.NewRequest(method, link, nil)
