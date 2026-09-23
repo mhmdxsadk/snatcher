@@ -1,5 +1,5 @@
 // Package security protects API resolution requests. Limits are process-local;
-// tunnel transfers rely on Cobalt signatures and separate upstream controls.
+// file transfers use expiring signatures checked by the download handler.
 package security
 
 import (
@@ -75,7 +75,7 @@ func New(cfg Config) *Guard {
 
 func (g *Guard) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/"+version.API+"/snatch" {
+		if r.URL.Path != "/"+version.API+"/snatch" && !strings.HasPrefix(r.URL.Path, "/"+version.API+"/jobs/") {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -14,15 +13,14 @@ import (
 )
 
 type Config struct {
-	ListenAddr string
-	CobaltURL  string
-	Security   security.Config
+	ListenAddr  string
+	DownloadDir string
+	Security    security.Config
 }
 
 func Load(getenv func(string) string) (Config, error) {
 	c := Config{
 		ListenAddr: strings.TrimSpace(getenv("LISTEN")),
-		CobaltURL:  strings.TrimSpace(getenv("COBALT_API")),
 	}
 	if c.ListenAddr == "" {
 		c.ListenAddr = "127.0.0.1:8080"
@@ -35,8 +33,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return Config{}, errors.New("LISTEN port must be an integer between 0 and 65535")
 	}
-	if err := ValidateCobaltURL(c.CobaltURL); err != nil {
-		return Config{}, err
+	c.DownloadDir = strings.TrimSpace(getenv("DOWNLOAD_DIR"))
+	if c.DownloadDir == "" {
+		c.DownloadDir = "/tmp/snatcher-downloads"
 	}
 	c.Security.APIKey = getenv("SNATCHER_API_KEY")
 	if len(c.Security.APIKey) < 32 || len(c.Security.APIKey) > 512 || strings.IndexFunc(c.Security.APIKey, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
@@ -75,22 +74,4 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	return c, nil
-}
-
-// ValidateCobaltURL accepts an HTTP(S) base URL, including a reverse proxy path.
-func ValidateCobaltURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return errors.New("COBALT_API must be an absolute HTTP(S) URL")
-	}
-	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return errors.New("COBALT_API must not contain credentials, a query, or a fragment")
-	}
-	if port := u.Port(); port != "" || strings.HasSuffix(u.Host, ":") {
-		n, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || n == 0 {
-			return errors.New("COBALT_API port must be an integer between 1 and 65535")
-		}
-	}
-	return nil
 }

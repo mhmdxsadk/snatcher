@@ -1,89 +1,16 @@
 package api
 
 import (
-	"bytes"
-	"compress/gzip"
-	"context"
 	"encoding/json"
+	"github.com/mhmdxsadk/snatcher/internal/security"
+	"github.com/mhmdxsadk/snatcher/internal/version"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/mhmdxsadk/snatcher/internal/client"
-	"github.com/mhmdxsadk/snatcher/internal/security"
 )
-
-func TestSnatcherIntegration(t *testing.T) {
-	tests := []struct {
-		name, response             string
-		upstreamStatus, wantStatus int
-		wantItems                  []Item
-		wantCode                   string
-	}{
-		{"tunnel", `{"status":"tunnel","url":"https://media.example/tunnel?id=1","filename":"../clip.mp4"}`, 200, 200, []Item{{"https://media.example/tunnel?id=1", "clip.mp4", "video"}}, ""},
-		{"redirect", `{"status":"redirect","url":"https://media.example/photo.jpg"}`, 200, 200, []Item{{"https://media.example/photo.jpg", "", "photo"}}, ""},
-		{"picker", `{"status":"picker","picker":[{"type":"photo","url":"https://media.example/1"},{"type":"video","url":"https://media.example/2"}],"audio":"https://media.example/audio"}`, 200, 200, []Item{{"https://media.example/1", "", "photo"}, {"https://media.example/2", "", "video"}}, ""},
-		{"local processing", `{"status":"local-processing","type":"merge","tunnel":["https://media.example/1"],"output":{"filename":"clip.mp4"}}`, 200, 422, nil, "processing_required"},
-		{"unavailable", `{"status":"error","error":{"code":"error.api.fetch.empty"}}`, 400, 422, nil, "media_unavailable"},
-		{"rate limited", `{"status":"error","error":{"code":"error.api.rate_limit"}}`, 429, 503, nil, "upstream_busy"},
-		{"non JSON rate limit", `busy`, 429, 503, nil, "upstream_busy"},
-		{"malformed upstream", `<html>bad gateway</html>`, 502, 502, nil, "upstream_error"},
-		{"empty picker", `{"status":"picker","picker":[]}`, 200, 502, nil, "upstream_error"},
-		{"unsafe media URL", `{"status":"tunnel","url":"file:///etc/passwd","filename":"clip.mp4"}`, 200, 502, nil, "invalid_upstream_response"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != "POST" || r.URL.Path != "/cobalt/" {
-					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-				}
-				if r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Accept") != "application/json" {
-					t.Error("missing JSON headers")
-				}
-				var body map[string]any
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					t.Error(err)
-				}
-				want := map[string]any{"url": "https://www.instagram.com/p/example/?img_index=2", "alwaysProxy": true, "localProcessing": "disabled", "videoQuality": "1080", "downloadMode": "auto", "audioFormat": "mp3", "audioBitrate": "128", "youtubeVideoCodec": "h264", "youtubeVideoContainer": "mp4", "allowH265": true}
-				if !reflect.DeepEqual(body, want) {
-					t.Errorf("upstream body = %#v", body)
-				}
-				w.WriteHeader(tt.upstreamStatus)
-				_, _ = w.Write([]byte(tt.response))
-			}))
-			defer upstream.Close()
-			c, err := client.New(upstream.URL + "/cobalt")
-			if err != nil {
-				t.Fatal(err)
-			}
-			req := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":" https://www.instagram.com/p/example/?igsh=tracking&img_index=2 "}`))
-			req.Header.Set("Content-Type", "application/json; charset=utf-8")
-			w := httptest.NewRecorder()
-			NewHandler(c).ServeHTTP(w, req)
-			if w.Code != tt.wantStatus {
-				t.Fatalf("status = %d, body = %s", w.Code, w.Body)
-			}
-			var body struct {
-				Status string
-				Items  []Item
-				Error  struct{ Code string }
-			}
-			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(body.Items, tt.wantItems) || body.Error.Code != tt.wantCode {
-				t.Errorf("unexpected response: %s", w.Body)
-			}
-			if (tt.wantStatus == 200 && body.Status != "success") || (tt.wantStatus != 200 && body.Status != "error") {
-				t.Errorf("unexpected envelope: %s", w.Body)
-			}
-		})
-	}
-}
 
 func TestRequestValidation(t *testing.T) {
 	tests := []struct {
@@ -113,8 +40,8 @@ func TestRequestValidation(t *testing.T) {
 			r := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			r.Header.Set("Content-Type", tt.contentType)
 			w := httptest.NewRecorder()
-			// Invalid requests must return before accessing Cobalt.
-			NewHandler(nil).ServeHTTP(w, r)
+			// Invalid requests must return before submitting a job.
+			NewHandler(nil, "").ServeHTTP(w, r)
 			var body struct{ Error struct{ Code string } }
 			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
@@ -131,7 +58,7 @@ func TestRequestValidation(t *testing.T) {
 
 func TestHealth(t *testing.T) {
 	w := httptest.NewRecorder()
-	NewHandler(nil).ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
+	NewHandler(nil, "").ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
 	if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"status":"ok"}` {
 		t.Fatalf("unexpected health: %d %s", w.Code, w.Body)
 	}
@@ -152,64 +79,6 @@ func TestNormalizeURL(t *testing.T) {
 	}
 }
 
-func TestUpstreamTimeout(t *testing.T) {
-	w := httptest.NewRecorder()
-	upstreamError(w, context.DeadlineExceeded)
-	if w.Code != 504 || !strings.Contains(w.Body.String(), `"code":"upstream_timeout"`) {
-		t.Fatalf("unexpected timeout: %d %s", w.Code, w.Body)
-	}
-}
-
-func TestDownloadOptions(t *testing.T) {
-	tests := []struct {
-		name, fields, quality, mode, format, filename, kind string
-	}{
-		{"720p", `,"quality":"720"`, "720", "auto", "mp3", "video.mp4", "video"},
-		{"1080p", `,"quality":"1080"`, "1080", "auto", "mp3", "video.mp4", "video"},
-		{"1440p", `,"quality":"1440"`, "1440", "auto", "mp3", "video.mp4", "video"},
-		{"4K silent", `,"quality":"2160","mode":"mute"`, "2160", "mute", "mp3", "video.mp4", "video"},
-		{"maximum", `,"quality":"max"`, "max", "auto", "mp3", "video.mp4", "video"},
-		{"MP3", `,"mode":"audio"`, "1080", "audio", "mp3", "audio.mp3", "audio"},
-		{"best audio", `,"mode":"audio","audioFormat":"best"`, "1080", "audio", "best", "audio.opus", "audio"},
-		{"empty defaults", `,"quality":"","mode":"","audioFormat":""`, "1080", "auto", "mp3", "video.mp4", "video"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body map[string]any
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					t.Error(err)
-				}
-				want := map[string]any{
-					"url": "https://www.youtube.com/watch?v=example", "alwaysProxy": true,
-					"localProcessing": "disabled", "videoQuality": tt.quality, "downloadMode": tt.mode,
-					"audioFormat": tt.format, "audioBitrate": "128", "youtubeVideoCodec": "h264", "youtubeVideoContainer": "mp4", "allowH265": true,
-				}
-				if !reflect.DeepEqual(body, want) {
-					t.Errorf("Cobalt request = %#v, want %#v", body, want)
-				}
-				_ = json.NewEncoder(w).Encode(map[string]string{"status": "tunnel", "url": "https://media.example/file", "filename": tt.filename})
-			}))
-			defer upstream.Close()
-			c, err := client.New(upstream.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://www.youtube.com/watch?v=example"`+tt.fields+`}`))
-			r.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			NewHandler(c).ServeHTTP(w, r)
-			var body struct{ Items []Item }
-			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-				t.Fatal(err)
-			}
-			if w.Code != 200 || len(body.Items) != 1 || body.Items[0].Type != tt.kind {
-				t.Fatalf("unexpected response: %d %s", w.Code, w.Body)
-			}
-		})
-	}
-}
-
 func TestInvalidOptions(t *testing.T) {
 	for _, tt := range []struct{ fields, code string }{
 		{`,"quality":"4k"`, "invalid_options"},
@@ -226,7 +95,7 @@ func TestInvalidOptions(t *testing.T) {
 			r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
-			NewHandler(nil).ServeHTTP(w, r)
+			NewHandler(nil, "").ServeHTTP(w, r)
 			var body struct{ Error struct{ Code string } }
 			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
@@ -238,243 +107,12 @@ func TestInvalidOptions(t *testing.T) {
 	}
 }
 
-func TestAudioGallery(t *testing.T) {
-	for _, tt := range []struct {
-		name, audio string
-		status      int
-		code        string
-	}{
-		{"background audio", `,"audio":"https://media.example/sound","audioFilename":"sound.m4a"`, 200, ""},
-		{"no audio", "", 422, "audio_unavailable"},
-		{"null audio", `,"audio":null`, 422, "audio_unavailable"},
-		{"empty audio", `,"audio":""`, 422, "audio_unavailable"},
-		{"malformed audio", `,"audio":{}`, 502, "invalid_upstream_response"},
-		{"invalid audio URL", `,"audio":"file:///audio"`, 502, "invalid_upstream_response"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(`{"status":"picker","picker":[{"type":"photo","url":"https://media.example/photo"}]` + tt.audio + `}`))
-			}))
-			defer upstream.Close()
-			c, err := client.New(upstream.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://example.com/gallery","mode":"audio"}`))
-			r.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			NewHandler(c).ServeHTTP(w, r)
-			var body struct {
-				Items []Item
-				Error struct{ Code string }
-			}
-			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-				t.Fatal(err)
-			}
-			if w.Code != tt.status || body.Error.Code != tt.code {
-				t.Fatalf("unexpected response: %d %s", w.Code, w.Body)
-			}
-			if tt.status == 200 && !reflect.DeepEqual(body.Items, []Item{{URL: "https://media.example/sound", Filename: "sound.m4a", Type: "audio"}}) {
-				t.Fatalf("unexpected audio: %s", w.Body)
-			}
-		})
-	}
-}
-
-func TestTunnelProxy(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/tunnel" || r.URL.Query().Get("sig") != "a+b" {
-			t.Errorf("unexpected upstream URL: %s", r.URL)
-		}
-		if r.Header.Get("Range") != "bytes=0-3" {
-			t.Errorf("missing range: %v", r.Header)
-		}
-		w.Header().Set("Content-Type", "video/mp4")
-		w.Header().Set("Content-Range", "bytes 0-3/10")
-		w.Header().Set("Set-Cookie", "private=value")
-		w.WriteHeader(http.StatusPartialContent)
-		if r.Method != http.MethodHead {
-			_, _ = w.Write([]byte("data"))
-		}
-	}))
-	defer upstream.Close()
-	c, err := client.New(upstream.URL + "/api/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, method := range []string{http.MethodGet, http.MethodHead} {
-		t.Run(method, func(t *testing.T) {
-			r := httptest.NewRequest(method, "/tunnel?id=1&exp=2&sig=a%2Bb", nil)
-			r.Header.Set("Range", "bytes=0-3")
-			w := httptest.NewRecorder()
-			NewHandler(c).ServeHTTP(w, r)
-			if w.Code != http.StatusPartialContent || w.Header().Get("Content-Range") != "bytes 0-3/10" || w.Header().Get("Set-Cookie") != "" {
-				t.Fatalf("unexpected response: %d %v", w.Code, w.Header())
-			}
-			want := "data"
-			if method == http.MethodHead {
-				want = ""
-			}
-			if w.Body.String() != want {
-				t.Fatalf("body = %q, want %q", w.Body.String(), want)
-			}
-		})
-	}
-}
-
-func TestTunnelRejectsEmptyDownloads(t *testing.T) {
-	for _, tt := range []struct {
-		name          string
-		status        int
-		chunked       bool
-		contentLength string
-		wantCode      string
-	}{
-		{"empty", http.StatusOK, false, "0", "empty_download"},
-		{"empty chunked", http.StatusOK, true, "", "empty_download"},
-		{"empty range", http.StatusPartialContent, true, "", "empty_download"},
-		{"no content", http.StatusNoContent, false, "", "empty_download"},
-		{"failed before first byte", http.StatusOK, false, "100", "upstream_error"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "video/mp4")
-				w.Header().Set("Content-Disposition", `attachment; filename="video.mp4"`)
-				if tt.contentLength != "" {
-					w.Header().Set("Content-Length", tt.contentLength)
-				}
-				w.WriteHeader(tt.status)
-				if tt.chunked {
-					w.(http.Flusher).Flush()
-				}
-			}))
-			defer upstream.Close()
-			c, err := client.New(upstream.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			w := httptest.NewRecorder()
-			NewHandler(c).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
-			if w.Code != http.StatusBadGateway || w.Header().Get("Content-Type") != "application/json" {
-				t.Fatalf("response = %d %v %s", w.Code, w.Header(), w.Body.String())
-			}
-			for _, name := range []string{"Content-Disposition", "Content-Length", "Content-Range"} {
-				if w.Header().Get(name) != "" {
-					t.Errorf("download header %s leaked into error", name)
-				}
-			}
-			var body struct {
-				Error struct {
-					Code string `json:"code"`
-				} `json:"error"`
-			}
-			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Error.Code != tt.wantCode {
-				t.Fatalf("error = %s, want %s; decode: %v", w.Body.String(), tt.wantCode, err)
-			}
-		})
-	}
-}
-
-func TestTunnelPreservesBody(t *testing.T) {
-	for _, body := range []string{"x", "complete media bytes"} {
-		t.Run(body, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = io.WriteString(w, body)
-			}))
-			defer upstream.Close()
-			c, err := client.New(upstream.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			w := httptest.NewRecorder()
-			NewHandler(c).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
-			if w.Code != http.StatusOK || w.Body.String() != body {
-				t.Fatalf("response = %d %q, want 200 %q", w.Code, w.Body.String(), body)
-			}
-		})
-	}
-}
-
-func TestRewriteTunnelURL(t *testing.T) {
-	c, err := client.New("http://media-service:9000/api/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tt := range []struct{ raw, proto, want string }{
-		{"http://media-service:9000/api/tunnel?id=1&sig=a%2Bb", "", "http://snatcher.example/tunnel?id=1&sig=a%2Bb"},
-		{"http://media-service:9000/api/tunnel?id=1", "https", "https://snatcher.example/tunnel?id=1"},
-		{"https://external.example/tunnel?id=1", "", "https://external.example/tunnel?id=1"},
-		{"http://media-service:9001/api/tunnel?id=1", "", "http://media-service:9001/api/tunnel?id=1"},
-	} {
-		r := httptest.NewRequest(http.MethodPost, "http://snatcher.example/v1/snatch", nil)
-		r.Header.Set("X-Forwarded-Proto", tt.proto)
-		got, err := rewriteTunnelURL(c, r, tt.raw)
-		if err != nil || got != tt.want {
-			t.Errorf("rewrite %q = %q, %v; want %q", tt.raw, got, err, tt.want)
-		}
-	}
-}
-
-func TestInvalidTunnelRequest(t *testing.T) {
-	for _, target := range []string{"/tunnel", "/tunnel?id=1&exp=2", "/tunnel?id=1&exp=2&sig=x&bad=%zz"} {
-		w := httptest.NewRecorder()
-		NewHandler(nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("%s: status = %d", target, w.Code)
-		}
-	}
-}
-
-func TestTruncatedTunnelAbortsResponse(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "100")
-		_, _ = w.Write([]byte("partial"))
-	}))
-	defer upstream.Close()
-	c, err := client.New(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if got := recover(); got != http.ErrAbortHandler {
-			t.Errorf("panic = %v, want http.ErrAbortHandler", got)
-		}
-	}()
-	NewHandler(c).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
-}
-
-func TestTunnelOutlastsServerWriteTimeout(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(100 * time.Millisecond)
-		_, _ = w.Write([]byte("media"))
-	}))
-	defer upstream.Close()
-	c, err := client.New(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewUnstartedServer(NewHandler(c))
-	server.Config.WriteTimeout = 20 * time.Millisecond
-	server.Start()
-	defer server.Close()
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-	resp, err := httpClient.Get(server.URL + "/tunnel?id=1&exp=2&sig=x")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil || string(body) != "media" || resp.StatusCode != http.StatusOK {
-		t.Fatalf("response = %d %q, %v", resp.StatusCode, body, err)
-	}
-}
-
 func TestServiceInfo(t *testing.T) {
 	guard := security.New(security.Config{
 		APIKey: strings.Repeat("k", 32), IPPerMinute: 20, IPBurst: 5,
 		GlobalPerMinute: 60, GlobalBurst: 10, MaxConcurrent: 2, MaxClients: 100,
 	})
-	server := httptest.NewServer(guard.Wrap(NewHandler(nil)))
+	server := httptest.NewServer(guard.Wrap(NewHandler(nil, "")))
 	defer server.Close()
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		r, err := http.NewRequest(method, server.URL+"/", nil)
@@ -500,7 +138,7 @@ func TestServiceInfo(t *testing.T) {
 		if err := json.Unmarshal(body, &got); err != nil {
 			t.Fatal(err)
 		}
-		want := map[string]string{"name": "Snatcher", "version": "0.1.0", "api": "v1"}
+		want := map[string]string{"name": "Snatcher", "version": version.Release, "api": version.API}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("metadata = %v, want %v", got, want)
 		}
@@ -512,30 +150,5 @@ func TestServiceInfo(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated resolution returned %d", resp.StatusCode)
-	}
-}
-
-func TestTunnelPreservesContentEncoding(t *testing.T) {
-	var compressed bytes.Buffer
-	zw := gzip.NewWriter(&compressed)
-	if _, err := zw.Write([]byte("media")); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Encoding", "gzip")
-		_, _ = w.Write(compressed.Bytes())
-	}))
-	defer upstream.Close()
-	c, err := client.New(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := httptest.NewRecorder()
-	NewHandler(c).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tunnel?id=1&exp=2&sig=x", nil))
-	if w.Code != http.StatusOK || w.Header().Get("Content-Encoding") != "gzip" || !bytes.Equal(w.Body.Bytes(), compressed.Bytes()) {
-		t.Fatalf("encoded response was altered: status=%d headers=%v", w.Code, w.Header())
 	}
 }

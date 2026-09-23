@@ -1,8 +1,11 @@
 services:
   snatcher:
+    build: .
     image: ghcr.io/mhmdxsadk/snatcher:latest
     restart: unless-stopped
     read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=2g
     cap_drop:
       - ALL
     security_opt:
@@ -11,5 +14,4 @@ services:
     ports:
       - "127.0.0.1:8080:8080/tcp"
     environment:
-      COBALT_API: "http://your-cobalt-host:9000"
       SNATCHER_API_KEY: "GENERATE_ME" # Generate with: openssl rand -hex 32

@@ -188,3 +188,21 @@ func TestBoundedClientMemory(t *testing.T) {
 		t.Fatal("full bucket not reclaimed")
 	}
 }
+
+func TestJobRoutesRequireAuthentication(t *testing.T) {
+	for _, path := range []string{"/v1/jobs/example", "/v1/jobs/example/cancel"} {
+		for _, key := range []string{"", token()} {
+			r := httptest.NewRequest("GET", path, nil)
+			r.Header.Set("X-API-Key", key)
+			w := httptest.NewRecorder()
+			fixture().Wrap(okHandler()).ServeHTTP(w, r)
+			want := 200
+			if key == "" {
+				want = 401
+			}
+			if w.Code != want {
+				t.Fatalf("%s: %d", path, w.Code)
+			}
+		}
+	}
+}

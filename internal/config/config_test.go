@@ -6,7 +6,7 @@ import (
 )
 
 func TestSecurityConfig(t *testing.T) {
-	base := map[string]string{"COBALT_API": "http://localhost:9000", "SNATCHER_API_KEY": strings.Repeat("k", 32)}
+	base := map[string]string{"SNATCHER_API_KEY": strings.Repeat("k", 32)}
 	cfg, err := Load(func(k string) string { return base[k] })
 	if err != nil {
 		t.Fatal(err)
@@ -16,7 +16,6 @@ func TestSecurityConfig(t *testing.T) {
 	}
 	for _, tt := range []struct{ key, value string }{
 		{"LISTEN", "localhost"}, {"LISTEN", "localhost:"}, {"LISTEN", ":invalid"}, {"LISTEN", ":65536"},
-		{"COBALT_API", ""}, {"COBALT_API", "not-a-url"},
 		{"SNATCHER_API_KEY", ""}, {"SNATCHER_API_KEY", "short"}, {"SNATCHER_API_KEY", strings.Repeat(" ", 32)},
 		{"RATE_LIMIT_PER_IP", "0"}, {"RATE_BURST_PER_IP", "-1"}, {"RATE_LIMIT_GLOBAL", "no"},
 		{"MAX_CONCURRENT", "10001"}, {"MAX_RATE_CLIENTS", "0"},
@@ -45,30 +44,5 @@ func TestSecurityConfig(t *testing.T) {
 	})
 	if err != nil || len(cfg.Security.TrustedProxies) != 2 || cfg.Security.GlobalPerMinute != 120 {
 		t.Fatal("overrides failed", err)
-	}
-}
-
-func TestValidateCobaltURL(t *testing.T) {
-	for _, raw := range []string{
-		"http://localhost:9000", "https://cobalt.example", "https://cobalt.example/api/",
-		"http://[::1]:9000", "http://localhost:65535",
-	} {
-		t.Run(raw, func(t *testing.T) {
-			if err := ValidateCobaltURL(raw); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-	for _, raw := range []string{
-		"", "localhost:9000", "file:///tmp/cobalt", "https://",
-		"http://user:password@localhost", "http://localhost?key=secret", "http://localhost?",
-		"http://localhost/#fragment", "http://localhost:", "http://localhost:0",
-		"http://localhost:65536", "http://localhost:invalid",
-	} {
-		t.Run(raw, func(t *testing.T) {
-			if err := ValidateCobaltURL(raw); err == nil {
-				t.Fatalf("accepted invalid Cobalt URL %q", raw)
-			}
-		})
 	}
 }

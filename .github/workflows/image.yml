@@ -35,7 +35,7 @@ jobs:
           docker run -d --name snatcher-test \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
             -p 127.0.0.1:8080:8080 \
-            -e COBALT_API=http://127.0.0.1:9000 \
+            --tmpfs /tmp:mode=1777,size=2g \
             -e SNATCHER_API_KEY=ci-only-test-key-not-a-real-secret-00000000 \
             snatcher:test
           trap 'docker logs snatcher-test; docker rm -f snatcher-test' EXIT
