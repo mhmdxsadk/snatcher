@@ -16,9 +16,9 @@ import (
 
 type testDownloadRunner struct{}
 
-func (testDownloadRunner) Run(_ context.Context, _ download.Request, d string) (string, error) {
+func (testDownloadRunner) Run(_ context.Context, _ download.Request, d string) ([]string, error) {
 	p := filepath.Join(d, "clip.mp4")
-	return p, os.WriteFile(p, []byte("test media bytes"), 0600)
+	return []string{p}, os.WriteFile(p, []byte("test media bytes"), 0600)
 }
 func TestDownloadJobLifecycle(t *testing.T) {
 	m, err := download.New(t.TempDir(), testDownloadRunner{})
@@ -85,5 +85,60 @@ func TestDownloadJobLifecycle(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest("GET", link+"bad", nil))
 	if w.Code != 403 {
 		t.Fatal(w.Code)
+	}
+}
+
+type galleryRunner struct{}
+
+func (galleryRunner) Run(_ context.Context, _ download.Request, dir string) ([]string, error) {
+	paths := []string{filepath.Join(dir, "001.jpg"), filepath.Join(dir, "002.mp4")}
+	for i, path := range paths {
+		if err := os.WriteFile(path, []byte(strings.Repeat(string(rune('a'+i)), 8)), 0600); err != nil {
+			return nil, err
+		}
+	}
+	return paths, nil
+}
+
+func TestGalleryLinks(t *testing.T) {
+	manager, err := download.New(t.TempDir(), galleryRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	job, err := manager.Submit(download.Request{Mode: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(manager, "test secret")
+	var result struct{ Items []Item }
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/v1/jobs/"+job.ID, nil))
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Items) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(result.Items) != 2 || result.Items[0].Type != "photo" || result.Items[1].Type != "video" {
+		t.Fatalf("%+v", result)
+	}
+	for i, item := range result.Items {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", item.URL, nil))
+		if w.Code != 200 || w.Body.String() != strings.Repeat(string(rune('a'+i)), 8) {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+	}
+	// A signature for one item must not authorize another item.
+	tampered := strings.Replace(result.Items[1].URL, "/1?", "?", 1)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("GET", tampered, nil))
+	if w.Code != 403 {
+		t.Fatalf("item substitution accepted: %d", w.Code)
 	}
 }

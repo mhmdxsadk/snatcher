@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -42,10 +43,16 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 			if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" || proto == "http" {
 				scheme = proto
 			}
-			link := url.URL{Scheme: scheme, Host: r.Host, Path: "/download/" + job.ID}
-			query := url.Values{"exp": {expiry}, "sig": {downloadSignature(key, job.ID, expiry)}}
-			link.RawQuery = query.Encode()
-			response.Items = []Item{{URL: link.String(), Filename: job.Filename, Type: job.MediaType}}
+			for index, path := range job.Files {
+				itemID := job.ID
+				if index > 0 {
+					itemID += "/" + strconv.Itoa(index)
+				}
+				link := url.URL{Scheme: scheme, Host: r.Host, Path: "/download/" + itemID}
+				query := url.Values{"exp": {expiry}, "sig": {downloadSignature(key, itemID, expiry)}}
+				link.RawQuery = query.Encode()
+				response.Items = append(response.Items, Item{URL: link.String(), Filename: filepath.Base(path), Type: download.MediaType(path, job.MediaType)})
+			}
 		}
 		writeJSON(w, http.StatusOK, response)
 	})
@@ -57,26 +64,37 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 		}
 		writeJSON(w, http.StatusOK, job)
 	})
-	mux.HandleFunc("/download/{id}", func(w http.ResponseWriter, r *http.Request) {
+	serveDownload := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" && r.Method != "HEAD" {
 			w.Header().Set("Allow", "GET, HEAD")
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET or HEAD.")
 			return
 		}
 		id := r.PathValue("id")
+		itemID := id
+		index := 0
+		if raw := r.PathValue("index"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || strconv.Itoa(parsed) != raw {
+				writeError(w, http.StatusNotFound, "not_found", "Download not found.")
+				return
+			}
+			index = parsed
+			itemID += "/" + raw
+		}
 		expiry := r.URL.Query().Get("exp")
 		sig := r.URL.Query().Get("sig")
 		timestamp, err := strconv.ParseInt(expiry, 10, 64)
-		if err != nil || time.Now().Unix() >= timestamp || !hmac.Equal([]byte(sig), []byte(downloadSignature(key, id, expiry))) {
+		if err != nil || time.Now().Unix() >= timestamp || !hmac.Equal([]byte(sig), []byte(downloadSignature(key, itemID, expiry))) {
 			writeError(w, http.StatusForbidden, "invalid_link", "Download link is invalid or expired.")
 			return
 		}
 		job, ok := d.Get(id)
-		if !ok || job.Status != download.StatusCompleted {
+		if !ok || job.Status != download.StatusCompleted || index >= len(job.Files) {
 			writeError(w, http.StatusNotFound, "not_found", "Download not found.")
 			return
 		}
-		file, err := os.Open(job.Path)
+		file, err := os.Open(job.Files[index])
 		if err != nil {
 			writeError(w, http.StatusNotFound, "not_found", "Download not found.")
 			return
@@ -89,7 +107,9 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 		}
 		http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": job.Filename}))
-		http.ServeContent(w, r, job.Filename, info.ModTime(), file)
-	})
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(job.Files[index])}))
+		http.ServeContent(w, r, filepath.Base(job.Files[index]), info.ModTime(), file)
+	}
+	mux.HandleFunc("/download/{id}", serveDownload)
+	mux.HandleFunc("/download/{id}/{index}", serveDownload)
 }

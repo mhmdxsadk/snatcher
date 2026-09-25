@@ -32,6 +32,9 @@ jobs:
         run: |
           set -euo pipefail
           docker build -t snatcher:test .
+          docker run --rm --network none --read-only --tmpfs /tmp:mode=1777 \
+            -v "$PWD/internal/download:/tests:ro" --entrypoint python3 \
+            snatcher:test /tests/gallery_test.py
           docker run -d --name snatcher-test \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
             -p 127.0.0.1:8080:8080 \

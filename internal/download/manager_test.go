@@ -10,7 +10,10 @@ import (
 
 type runnerFunc func(context.Context, Request, string) (string, error)
 
-func (f runnerFunc) Run(c context.Context, r Request, d string) (string, error) { return f(c, r, d) }
+func (f runnerFunc) Run(c context.Context, r Request, d string) ([]string, error) {
+	p, err := f(c, r, d)
+	return []string{p}, err
+}
 func awaitStatus(t *testing.T, m *Manager, id, status string) Job {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -42,7 +45,7 @@ func TestCompletionAndCleanup(t *testing.T) {
 		t.Fatal(j)
 	}
 	m.Close()
-	if _, err := os.Stat(j.Path); !os.IsNotExist(err) {
+	if _, err := os.Stat(j.Files[0]); !os.IsNotExist(err) {
 		t.Fatal("file survived close")
 	}
 }
@@ -174,5 +177,55 @@ func TestAudioContainerClassification(t *testing.T) {
 	job = awaitStatus(t, m, job.ID, StatusCompleted)
 	if job.MediaType != "audio" {
 		t.Fatal("audio-only WebM classified as video")
+	}
+}
+
+type filesRunner func(context.Context, Request, string) ([]string, error)
+
+func (f filesRunner) Run(ctx context.Context, r Request, dir string) ([]string, error) {
+	return f(ctx, r, dir)
+}
+
+func TestGalleryValidation(t *testing.T) {
+	for _, kind := range []string{"empty", "duplicate", "symlink", "too-many", "oversize", "valid"} {
+		t.Run(kind, func(t *testing.T) {
+			manager, err := New(t.TempDir(), filesRunner(func(_ context.Context, _ Request, dir string) ([]string, error) {
+				path := filepath.Join(dir, "001.jpg")
+				if err := os.WriteFile(path, []byte("photo"), 0600); err != nil {
+					return nil, err
+				}
+				switch kind {
+				case "empty":
+					return nil, nil
+				case "duplicate":
+					return []string{path, path}, nil
+				case "symlink":
+					link := filepath.Join(dir, "link.jpg")
+					return []string{link}, os.Symlink(path, link)
+				case "too-many":
+					return make([]string, maxJobFiles+1), nil
+				case "oversize":
+					return []string{path}, os.Truncate(path, maxJobBytes+1)
+				}
+				return []string{path}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			job, _ := manager.Submit(Request{})
+			want := StatusFailed
+			if kind == "valid" {
+				want = StatusCompleted
+			}
+			result := awaitStatus(t, manager, job.ID, want)
+			if kind == "valid" {
+				result.Files[0] = "modified"
+				fresh, _ := manager.Get(job.ID)
+				if fresh.Files[0] == "modified" {
+					t.Fatal("snapshot aliases manager files")
+				}
+			}
+		})
 	}
 }

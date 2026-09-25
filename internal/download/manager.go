@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,16 +28,16 @@ const (
 
 type Request struct{ URL, Quality, Mode, AudioFormat string }
 type Job struct {
+	Files     []string  `json:"-"`
 	ID        string    `json:"id"`
 	Status    string    `json:"status"`
 	Error     string    `json:"error,omitempty"`
 	Filename  string    `json:"filename,omitempty"`
 	Expires   time.Time `json:"expiresAt,omitzero"`
-	Path      string    `json:"-"`
 	MediaType string    `json:"-"`
 }
 type Runner interface {
-	Run(context.Context, Request, string) (string, error)
+	Run(context.Context, Request, string) ([]string, error)
 }
 
 var ErrFull = errors.New("download queue is full")
@@ -115,7 +116,9 @@ func (m *Manager) Get(id string) (Job, bool) {
 	if !ok || expired(e, time.Now()) {
 		return Job{}, false
 	}
-	return e.Job, true
+	snapshot := e.Job
+	snapshot.Files = append([]string(nil), e.Files...)
+	return snapshot, true
 }
 
 // Cancel returns the resulting snapshot atomically, including terminal jobs.
@@ -131,7 +134,9 @@ func (m *Manager) Cancel(id string) (Job, bool) {
 		e.Status = StatusCancelled
 		e.Expires = time.Now().Add(jobTTL)
 	}
-	return e.Job, true
+	snapshot := e.Job
+	snapshot.Files = append([]string(nil), e.Files...)
+	return snapshot, true
 }
 
 func expired(e *entry, now time.Time) bool {
@@ -192,23 +197,41 @@ func (m *Manager) run(e *entry) {
 	m.mu.Unlock()
 	dir := filepath.Join(m.root, e.ID)
 	err := os.Mkdir(dir, 0700)
-	var file string
+	var files []string
 	if err == nil {
 		ctx, cancel := context.WithTimeout(e.ctx, jobTimeout)
-		file, err = m.runner.Run(ctx, e.request, dir)
+		files, err = m.runner.Run(ctx, e.request, dir)
 		cancel()
 	}
 	// Validate the result before publishing it; never expose a partial file.
 	status, message := StatusCompleted, ""
 	if err != nil {
+		slog.Warn("download failed", "job", e.ID, "error", err)
 		status, message = StatusFailed, "Download failed. The source may require authentication or be unavailable."
+		if errors.Is(err, ErrGalleryLogin) {
+			message = "The gallery source requires authentication. Anonymous downloading is unavailable for this post."
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			message = "Download exceeded the time limit."
 		}
 	} else {
-		info, statErr := os.Lstat(file)
-		if statErr != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxJobBytes || filepath.Dir(file) != dir {
+		var total int64
+		seen := map[string]bool{}
+		if len(files) == 0 || len(files) > maxJobFiles {
 			status, message = StatusFailed, "The downloader returned no usable media."
+		}
+		for _, file := range files {
+			info, statErr := os.Lstat(file)
+			if statErr != nil || !info.Mode().IsRegular() || info.Size() == 0 || filepath.Dir(file) != dir || seen[file] {
+				status, message = StatusFailed, "The downloader returned invalid media."
+				break
+			}
+			seen[file] = true
+			total += info.Size()
+			if total > maxJobBytes {
+				status, message = StatusFailed, "Download exceeded the size limit."
+				break
+			}
 		}
 	}
 	m.mu.Lock()
@@ -218,7 +241,8 @@ func (m *Manager) run(e *entry) {
 	e.Status, e.Error = status, message
 	e.Expires = time.Now().Add(jobTTL)
 	if status == StatusCompleted {
-		e.Path, e.Filename = file, filepath.Base(file)
+		e.Files = append([]string(nil), files...)
+		e.Filename = filepath.Base(files[0])
 		e.MediaType = "video"
 		if e.request.Mode == "audio" {
 			e.MediaType = "audio"

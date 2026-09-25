@@ -1,7 +1,7 @@
 # Snatcher
 
-A self-hosted media download API for Apple Shortcuts, powered by yt-dlp and
-FFmpeg. Share a URL, wait for the download, and save it to Photos or Files.
+A self-hosted media download API for Apple Shortcuts, powered by yt-dlp, gallery-dl,
+and FFmpeg. Share a URL, wait for the download, and save it to Photos or Files.
 
 ## Quick start
 
@@ -23,7 +23,7 @@ Keep the loopback port binding and use an HTTPS reverse proxy or Tailscale for
 remote access.
 
 Submit a URL to `POST /v1/snatch` with your `X-API-Key`. Poll the returned job
-location, then download the completed file.
+location, then download the completed files.
 
 ## Documentation
 

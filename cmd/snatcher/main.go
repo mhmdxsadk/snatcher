@@ -35,12 +35,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{"ffmpeg", "ffprobe", "node"} {
+	for _, name := range []string{"ffmpeg", "ffprobe", "node", "gallery-dl", "python3"} {
 		if _, err := exec.LookPath(name); err != nil {
 			return err
 		}
 	}
-	manager, err := download.New(cfg.DownloadDir, download.YTDLP{Binary: binary})
+	manager, err := download.New(cfg.DownloadDir, download.Pipeline{Video: download.YTDLP{Binary: binary}, Python: "python3"})
 	if err != nil {
 		return err
 	}

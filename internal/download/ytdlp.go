@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 type YTDLP struct{ Binary string }
@@ -43,40 +42,12 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (y YTDLP) Run(ctx context.Context, r Request, dir string) (string, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ctx, stop := watchSize(ctx, dir)
+	defer stop()
 	cmd := mediaCommand(ctx, y.Binary, arguments(r, dir)...)
 	var out boundedOutput
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
-	// Bound partial files too, including formats without Content-Length.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		tick := time.NewTicker(time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				var size int64
-				filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-					if err == nil && !d.IsDir() {
-						if i, e := d.Info(); e == nil {
-							size += i.Size()
-						}
-					}
-					return nil
-				})
-				if size > maxJobBytes {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	defer func() { cancel(); <-done }()
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		return "", ctx.Err()

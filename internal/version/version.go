@@ -2,6 +2,6 @@
 package version
 
 const (
-	Release = "0.2.5"
+	Release = "0.3.0"
 	API     = "v1"
 )
