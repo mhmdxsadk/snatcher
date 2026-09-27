@@ -1,6 +1,9 @@
 package download
 
 import (
+	"errors"
+	"strings"
+
 	"context"
 	"os"
 	"path/filepath"
@@ -227,5 +230,65 @@ func TestGalleryValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAggregateStorageBudgetAndCleanup(t *testing.T) {
+	m, err := NewWithStorageLimit(t.TempDir(), runnerFunc(func(_ context.Context, _ Request, dir string) (string, error) {
+		p := filepath.Join(dir, "clip.mp4")
+		return p, os.WriteFile(p, make([]byte, 64), 0600)
+	}), maxJobBytes+100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	for i := 0; i < 2; i++ {
+		j, err := m.Submit(Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		awaitStatus(t, m, j.ID, StatusCompleted)
+	}
+	if _, err := m.Submit(Request{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("expected storage backpressure, got %v", err)
+	}
+	// Existing signed downloads remain available; storage is reclaimed at expiry.
+	m.mu.Lock()
+	if m.used != 128 {
+		t.Errorf("retained bytes %d", m.used)
+	}
+	m.mu.Unlock()
+	m.cleanup(time.Now().Add(2 * time.Hour))
+	j, err := m.Submit(Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitStatus(t, m, j.ID, StatusCompleted)
+}
+
+func TestQueuedJobRechecksStorage(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	m, err := NewWithStorageLimit(t.TempDir(), runnerFunc(func(_ context.Context, _ Request, dir string) (string, error) {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+		}
+		p := filepath.Join(dir, "clip.mp4")
+		return p, os.WriteFile(p, make([]byte, 64), 0600)
+	}), maxJobBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	a, _ := m.Submit(Request{})
+	<-started
+	b, _ := m.Submit(Request{})
+	close(release)
+	awaitStatus(t, m, a.ID, StatusCompleted)
+	j := awaitStatus(t, m, b.ID, StatusFailed)
+	if !strings.Contains(j.Error, "storage is full") {
+		t.Fatal(j.Error)
 	}
 }

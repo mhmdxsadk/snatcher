@@ -25,6 +25,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Install media validator for unit tests
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: go test -race ./...
       - run: go vet ./...
       - name: Build and smoke-test the container
@@ -32,13 +34,13 @@ jobs:
         run: |
           set -euo pipefail
           docker build -t snatcher:test .
-          docker run --rm --network none --read-only --tmpfs /tmp:mode=1777 \
-            -v "$PWD/internal/download:/tests:ro" --entrypoint python3 \
-            snatcher:test /tests/gallery_test.py
+          CGO_ENABLED=0 go test -c -o /tmp/download.test ./internal/download
           docker run -d --name snatcher-test \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
             -p 127.0.0.1:8080:8080 \
             --tmpfs /tmp:mode=1777,size=2g \
+            -v /tmp/download.test:/download.test:ro \
+            -e COBALT_API=http://127.0.0.1:18081/ \
             -e SNATCHER_API_KEY=ci-only-test-key-not-a-real-secret-00000000 \
             snatcher:test
           trap 'docker logs snatcher-test; docker rm -f snatcher-test' EXIT
@@ -48,6 +50,9 @@ jobs:
             --max-time 5 -H 'Content-Type: application/json' \
             --data '{"url":"https://example.com/video"}' http://127.0.0.1:8080/v1/snatch)
           test "$status" = 401
+          # Use the image's exact yt-dlp, FFmpeg and Node versions, offline fixtures only.
+          docker exec -e SNATCHER_INTEGRATION=1 snatcher-test /download.test -test.run Integration -test.v
+          docker exec -i snatcher-test python3 < scripts/smoke.py
 
   image:
     needs: test

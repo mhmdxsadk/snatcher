@@ -6,16 +6,21 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/mhmdxsadk/snatcher/internal/download"
 	"github.com/mhmdxsadk/snatcher/internal/security"
 )
 
 type Config struct {
-	ListenAddr  string
-	DownloadDir string
-	Security    security.Config
+	CobaltAPI    string
+	CobaltAPIKey string
+	ListenAddr   string
+	DownloadDir  string
+	StorageLimit int64
+	Security     security.Config
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -36,6 +41,25 @@ func Load(getenv func(string) string) (Config, error) {
 	c.DownloadDir = strings.TrimSpace(getenv("DOWNLOAD_DIR"))
 	if c.DownloadDir == "" {
 		c.DownloadDir = "/tmp/snatcher-downloads"
+	}
+	c.StorageLimit = download.DefaultStorageLimit
+	if raw := strings.TrimSpace(getenv("STORAGE_LIMIT_BYTES")); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < 1<<30 {
+			return Config{}, errors.New("STORAGE_LIMIT_BYTES must be an integer of at least 1073741824")
+		}
+		c.StorageLimit = value
+	}
+	c.CobaltAPI = strings.TrimSpace(getenv("COBALT_API"))
+	c.CobaltAPIKey = strings.TrimSpace(getenv("COBALT_API_KEY"))
+	if c.CobaltAPI != "" {
+		u, err := url.Parse(c.CobaltAPI)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return Config{}, errors.New("COBALT_API must be an absolute HTTP(S) endpoint without credentials, query, or fragment")
+		}
+	}
+	if strings.ContainsAny(c.CobaltAPIKey, "\r\n") {
+		return Config{}, errors.New("COBALT_API_KEY must not contain newlines")
 	}
 	c.Security.APIKey = getenv("SNATCHER_API_KEY")
 	if len(c.Security.APIKey) < 32 || len(c.Security.APIKey) > 512 || strings.IndexFunc(c.Security.APIKey, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {

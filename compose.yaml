@@ -15,3 +15,28 @@ services:
       - "127.0.0.1:8080:8080/tcp"
     environment:
       SNATCHER_API_KEY: "GENERATE_ME" # Generate with: openssl rand -hex 32
+      COBALT_API: "http://cobalt:9000/"
+      # The host reverse proxy reaches this container through the bridge gateway.
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-172.30.0.1/32}"
+      STORAGE_LIMIT_BYTES: "1879048192" # 1792 MiB; reserve headroom in the 2 GiB tmpfs.
+    depends_on:
+      - cobalt
+
+  cobalt:
+    image: ghcr.io/imputnet/cobalt:11
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=512m
+    environment:
+      API_URL: "http://cobalt:9000/"
+
+# A stable gateway makes proxy trust explicit. Change both subnet and
+# TRUSTED_PROXIES if this subnet overlaps an existing network.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: "${SNATCHER_SUBNET:-172.30.0.0/24}"
+          gateway: "${SNATCHER_GATEWAY:-172.30.0.1}"

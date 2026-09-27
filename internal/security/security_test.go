@@ -239,3 +239,52 @@ func TestForwardedSchemeTrust(t *testing.T) {
 		})
 	}
 }
+
+func TestPollingDoesNotConsumeSubmissionQuota(t *testing.T) {
+	g := fixture()
+	now := time.Now()
+	g.now = func() time.Time { return now }
+	g.polling.now = func() time.Time { return now }
+	h := g.Wrap(okHandler())
+	// All retained jobs can be polled at the Shortcut's three-second interval.
+	for tick := 0; tick < 100; tick++ {
+		for job := 0; job < 32; job++ {
+			r := httptest.NewRequest("GET", "/v1/jobs/example", nil)
+			r.RemoteAddr = "192.0.2.1:1234"
+			r.Header.Set("X-API-Key", token())
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Fatalf("tick %d job %d: %d", tick, job, w.Code)
+			}
+		}
+		now = now.Add(3 * time.Second)
+	}
+	for i := 0; i < 5; i++ {
+		if w := request(h, "192.0.2.1", token()); w.Code != 200 {
+			t.Fatal("polling consumed submission tokens")
+		}
+	}
+	if w := request(h, "192.0.2.1", token()); w.Code != 429 {
+		t.Fatal("submission limit lost")
+	}
+}
+
+func TestPollingStillBounded(t *testing.T) {
+	g := fixture()
+	h := g.Wrap(okHandler())
+	limited := false
+	for i := 0; i < 100; i++ {
+		r := httptest.NewRequest("GET", "/v1/jobs/example", nil)
+		r.Header.Set("X-API-Key", token())
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code == 429 {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("polling has no limit")
+	}
+}

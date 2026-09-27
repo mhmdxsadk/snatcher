@@ -1,7 +1,7 @@
 # Snatcher
 
-A self-hosted media download API for Apple Shortcuts, powered by yt-dlp, gallery-dl,
-and FFmpeg. Share a URL, wait for the download, and save it to Photos or Files.
+A self-hosted media download API for Apple Shortcuts, powered by yt-dlp and FFmpeg
+with an optional Cobalt fallback. Share a URL, wait for the download, and save it to Photos or Files.
 
 ## Quick start
 
@@ -12,7 +12,7 @@ Generate a key with:
 openssl rand -hex 32
 ```
 
-Build and start the single container:
+Build and start the services:
 
 ```sh
 docker compose up -d --build

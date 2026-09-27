@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,8 +39,7 @@ func compatibleVideo(ctx context.Context, source string, mute bool) (string, err
 	probe := mediaCommand(ctx, "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name,pix_fmt", "-of", "json", source)
 	var output boundedOutput
 	probe.Stdout = &output
-	probe.Stderr = io.Discard
-	if err := probe.Run(); err != nil {
+	if err := runMedia(probe); err != nil {
 		return "", err
 	}
 	var metadata struct {
@@ -83,10 +81,9 @@ func compatibleVideo(ctx context.Context, source string, mute bool) (string, err
 	}
 	args = append(args, "-movflags", "+faststart", temp)
 	cmd := mediaCommand(ctx, "ffmpeg", args...)
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
+	if err := runMedia(cmd); err != nil {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", context.Cause(ctx)
 		}
 		return "", err
 	}
@@ -100,4 +97,21 @@ func compatibleVideo(ctx context.Context, source string, mute bool) (string, err
 		}
 	}
 	return dest, nil
+}
+
+// Decode the complete image/audio file, not just its signature or metadata.
+// Explicit stream mapping rejects binary files mislabeled with a media suffix.
+func validateMedia(ctx context.Context, path, kind string) error {
+	stream := "0:v:0"
+	if kind == "audio" {
+		stream = "0:a:0"
+	}
+	cmd := mediaCommand(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-err_detect", "explode", "-i", path, "-map", stream, "-f", "null", "-")
+	if err := runMedia(cmd); err != nil {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		return err
+	}
+	return nil
 }

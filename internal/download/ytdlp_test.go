@@ -1,6 +1,8 @@
 package download
 
 import (
+	"errors"
+
 	"context"
 	"encoding/json"
 	"net/http"
@@ -105,5 +107,41 @@ func TestVideoConversionIntegration(t *testing.T) {
 			}
 			assertVideo(t, result, false)
 		})
+	}
+}
+
+func TestCollectionUsesFallbackIntegration(t *testing.T) {
+	if os.Getenv("SNATCHER_INTEGRATION") != "1" {
+		t.Skip("set SNATCHER_INTEGRATION=1")
+	}
+	root := t.TempDir()
+	out, err := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=32x32:d=1", "-c:v", "libx264", filepath.Join(root, "a.mp4")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "a.mp4"))
+	os.WriteFile(filepath.Join(root, "b.mp4"), data, 0600)
+	os.WriteFile(filepath.Join(root, "index.html"), []byte(`<html><title>Collection</title><video src="a.mp4"></video><video src="b.mp4"></video></html>`), 0600)
+	server := httptest.NewServer(http.FileServer(http.Dir(root)))
+	defer server.Close()
+	req := Request{URL: server.URL + "/index.html", Quality: "1080", Mode: "auto", AudioFormat: "mp3"}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fallbackCalled := false
+	p := Pipeline{Video: YTDLP{Binary: "yt-dlp"}, Fallback: filesRunner(func(_ context.Context, _ Request, dir string) ([]string, error) {
+		fallbackCalled = true
+		entries, _ := os.ReadDir(dir)
+		if len(entries) != 0 {
+			t.Fatal("primary downloaded partial collection")
+		}
+		return []string{"first.mp4", "second.jpg"}, nil
+	})}
+	files, err := p.Run(ctx, req, t.TempDir())
+	if err != nil || !fallbackCalled || len(files) != 2 {
+		t.Fatalf("%v %v %v", files, err, fallbackCalled)
+	}
+	_, err = (Pipeline{Video: YTDLP{Binary: "yt-dlp"}}).Run(ctx, req, t.TempDir())
+	if !errors.Is(err, ErrCollection) {
+		t.Fatalf("unconfigured fallback: %v", err)
 	}
 }

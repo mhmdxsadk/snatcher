@@ -48,19 +48,29 @@ type entry struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	active  bool
+	bytes   int64
 }
 type Manager struct {
-	mu     sync.Mutex
-	jobs   map[string]*entry
-	queue  chan *entry
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	root   string
-	runner Runner
+	mu           sync.Mutex
+	jobs         map[string]*entry
+	queue        chan *entry
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	root         string
+	runner       Runner
+	storageLimit int64
+	used         int64
 }
 
 func New(root string, runner Runner) (*Manager, error) {
+	return NewWithStorageLimit(root, runner, DefaultStorageLimit)
+}
+
+func NewWithStorageLimit(root string, runner Runner, limit int64) (*Manager, error) {
+	if limit < maxJobBytes {
+		return nil, errors.New("storage limit must reserve at least 1 GiB for a job")
+	}
 	// A private per-process directory makes ownership explicit. Jobs are ephemeral.
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
@@ -74,7 +84,7 @@ func New(root string, runner Runner) (*Manager, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &Manager{jobs: map[string]*entry{}, queue: make(chan *entry, queueCapacity), ctx: ctx, cancel: cancel, root: root, runner: runner}
+	m := &Manager{jobs: map[string]*entry{}, queue: make(chan *entry, queueCapacity), ctx: ctx, cancel: cancel, root: root, runner: runner, storageLimit: limit}
 	m.wg.Add(2)
 	go m.loop()
 	go m.cleanLoop()
@@ -93,6 +103,9 @@ func (m *Manager) Submit(r Request) (Job, error) {
 	defer m.mu.Unlock()
 	if m.ctx.Err() != nil || len(m.jobs) >= maxJobs {
 		return Job{}, ErrFull
+	}
+	if m.used > m.storageLimit-maxJobBytes {
+		return Job{}, ErrStorage
 	}
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
@@ -171,18 +184,27 @@ func (m *Manager) cleanLoop() {
 
 // Do filesystem work outside the mutex so polling cannot block on deletion.
 func (m *Manager) cleanup(now time.Time) {
-	var dirs []string
+	var retired []*entry
 	m.mu.Lock()
 	for id, e := range m.jobs {
 		if !e.active && expired(e, now) {
 			e.cancel()
 			delete(m.jobs, id)
-			dirs = append(dirs, filepath.Join(m.root, id))
+			retired = append(retired, e)
 		}
 	}
 	m.mu.Unlock()
-	for _, dir := range dirs {
-		_ = os.RemoveAll(dir)
+	for _, e := range retired {
+		if err := os.RemoveAll(filepath.Join(m.root, e.ID)); err != nil {
+			slog.Warn("download cleanup failed", "job", e.ID, "error", err)
+			m.mu.Lock()
+			m.jobs[e.ID] = e // Retry deletion on the next cleanup pass.
+			m.mu.Unlock()
+			continue // Do not release accounting for files still on disk.
+		}
+		m.mu.Lock()
+		m.used -= e.bytes
+		m.mu.Unlock()
 	}
 }
 
@@ -192,11 +214,25 @@ func (m *Manager) run(e *entry) {
 		m.mu.Unlock()
 		return
 	}
+	storageFull := m.used > m.storageLimit-maxJobBytes
 	e.Status = StatusRunning
 	e.active = true
 	m.mu.Unlock()
 	dir := filepath.Join(m.root, e.ID)
-	err := os.Mkdir(dir, 0700)
+	var err error
+	if storageFull {
+		err = ErrStorage
+	} else {
+		free, statErr := availableBytes(m.root)
+		if statErr != nil {
+			err = statErr
+		} else if free < maxJobBytes+(64<<20) {
+			err = ErrStorage
+		}
+	}
+	if err == nil {
+		err = os.Mkdir(dir, 0700)
+	}
 	var files []string
 	if err == nil {
 		ctx, cancel := context.WithTimeout(e.ctx, jobTimeout)
@@ -204,12 +240,25 @@ func (m *Manager) run(e *entry) {
 		cancel()
 	}
 	// Validate the result before publishing it; never expose a partial file.
+	var retained int64
+	if err == nil {
+		retained, err = directorySize(dir)
+	}
+	if err == nil && retained > maxJobBytes {
+		err = ErrSize
+	}
 	status, message := StatusCompleted, ""
 	if err != nil {
 		slog.Warn("download failed", "job", e.ID, "error", err)
 		status, message = StatusFailed, "Download failed. The source may require authentication or be unavailable."
-		if errors.Is(err, ErrGalleryLogin) {
-			message = "The gallery source requires authentication. Anonymous downloading is unavailable for this post."
+		if errors.Is(err, ErrStorage) {
+			message = "Download storage is full. Retry after completed downloads expire."
+		}
+		if errors.Is(err, ErrSize) {
+			message = "Download exceeded the size limit."
+		}
+		if errors.Is(err, ErrCollection) {
+			message = "This collection requires a configured Cobalt fallback."
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			message = "Download exceeded the time limit."
@@ -241,6 +290,8 @@ func (m *Manager) run(e *entry) {
 	e.Status, e.Error = status, message
 	e.Expires = time.Now().Add(jobTTL)
 	if status == StatusCompleted {
+		e.bytes = retained
+		m.used += retained
 		e.Files = append([]string(nil), files...)
 		e.Filename = filepath.Base(files[0])
 		e.MediaType = "video"

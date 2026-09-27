@@ -35,12 +35,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{"ffmpeg", "ffprobe", "node", "gallery-dl", "python3"} {
+	for _, name := range []string{"ffmpeg", "ffprobe", "node"} {
 		if _, err := exec.LookPath(name); err != nil {
 			return err
 		}
 	}
-	manager, err := download.New(cfg.DownloadDir, download.Pipeline{Video: download.YTDLP{Binary: binary}, Python: "python3"})
+	pipeline := download.Pipeline{Video: download.YTDLP{Binary: binary}}
+	if cfg.CobaltAPI != "" {
+		pipeline.Fallback = &download.Cobalt{Endpoint: cfg.CobaltAPI, APIKey: cfg.CobaltAPIKey}
+	}
+	manager, err := download.NewWithStorageLimit(cfg.DownloadDir, pipeline, cfg.StorageLimit)
 	if err != nil {
 		return err
 	}

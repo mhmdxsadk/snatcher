@@ -49,6 +49,7 @@ func (b *bucket) take(now time.Time, rate, burst int) int {
 }
 
 type Guard struct {
+	polling     *Guard
 	cfg         Config
 	key         [32]byte
 	mu          sync.Mutex
@@ -61,6 +62,16 @@ type Guard struct {
 
 // New expects validated, positive limits and a configured API key.
 func New(cfg Config) *Guard {
+	g := newGuard(cfg)
+	// Enough for all 32 retained/queued jobs polling every three seconds.
+	// Polling stays bounded, but cannot consume the submission allowance.
+	polling := cfg
+	polling.IPPerMinute, polling.IPBurst = 720, 64
+	polling.GlobalPerMinute, polling.GlobalBurst = 1440, 128
+	g.polling = newGuard(polling)
+	return g
+}
+func newGuard(cfg Config) *Guard {
 	now := time.Now()
 	return &Guard{
 		cfg:         cfg,
@@ -92,11 +103,6 @@ func (g *Guard) Wrap(next http.Handler) http.Handler {
 			reject(w, 400, "invalid_client", "Unable to determine client address.", 0)
 			return
 		}
-		// Charge unauthenticated attempts too, before checking credentials.
-		if retry := g.allowIP(ip); retry > 0 {
-			reject(w, 429, "rate_limited", "Too many requests. Try again later.", retry)
-			return
-		}
 		values := r.Header.Values("X-API-Key")
 		valid := len(values) == 1
 		var provided string
@@ -104,13 +110,23 @@ func (g *Guard) Wrap(next http.Handler) http.Handler {
 			provided = values[0]
 		}
 		digest := sha256.Sum256([]byte(provided))
-		if subtle.ConstantTimeCompare(digest[:], g.key[:]) != 1 || !valid {
+		authenticated := subtle.ConstantTimeCompare(digest[:], g.key[:]) == 1 && valid
+		limiter := g
+		if authenticated && (r.Method == "GET" || r.Method == "HEAD") && strings.HasPrefix(r.URL.Path, "/"+version.API+"/jobs/") {
+			limiter = g.polling
+		}
+		// Invalid credentials still consume the stricter submission quota.
+		if retry := limiter.allowIP(ip); retry > 0 {
+			reject(w, 429, "rate_limited", "Too many requests. Try again later.", retry)
+			return
+		}
+		if !authenticated {
 			reject(w, 401, "unauthorized", "A valid X-API-Key header is required.", 0)
 			return
 		}
-		g.mu.Lock()
-		retry := g.global.take(g.now(), g.cfg.GlobalPerMinute, g.cfg.GlobalBurst)
-		g.mu.Unlock()
+		limiter.mu.Lock()
+		retry := limiter.global.take(limiter.now(), limiter.cfg.GlobalPerMinute, limiter.cfg.GlobalBurst)
+		limiter.mu.Unlock()
 		if retry > 0 {
 			reject(w, 429, "rate_limited", "The service request limit has been reached. Try again later.", retry)
 			return

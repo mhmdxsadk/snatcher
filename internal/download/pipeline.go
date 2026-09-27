@@ -2,12 +2,9 @@ package download
 
 import (
 	"context"
-	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,82 +12,39 @@ import (
 
 const maxJobFiles = 20
 
-var ErrGalleryLogin = errors.New("gallery source requires authentication")
+var ErrSize = errors.New("download exceeded size limit")
 
-//go:embed gallery.py
-var galleryScript string
-
-// Pipeline isolates the gallery backend from the job and HTTP contracts.
-// Audio uses yt-dlp directly. Gallery discovery can fall back to yt-dlp;
-// once a photo gallery is identified, download failures never publish a subset.
 type Pipeline struct {
 	Video interface {
 		Run(context.Context, Request, string) (string, error)
 	}
-	Python string
+	Fallback Runner
 }
 
 func (p Pipeline) Run(ctx context.Context, r Request, dir string) ([]string, error) {
-	var galleryErr error
-	if r.Mode != "audio" {
-		files, err := p.gallery(ctx, r, dir)
-		if err == nil {
-			return files, nil
-		}
-		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		var exit *exec.ExitError
-		if !errors.Is(err, ErrGalleryLogin) && (!errors.As(err, &exit) || (exit.ExitCode() != 1 && exit.ExitCode() != 3)) {
-			return nil, err
-		}
-		galleryErr = err
-	}
 	file, err := p.Video.Run(ctx, r, dir)
-	if err != nil {
-		return nil, errors.Join(galleryErr, err)
+	if err == nil {
+		return []string{file}, nil
 	}
-	return []string{file}, nil
-}
-
-func (p Pipeline) gallery(ctx context.Context, r Request, dir string) ([]string, error) {
-	ctx, stop := watchSize(ctx, dir)
-	defer stop()
-	request, _ := json.Marshal(map[string]string{"url": r.URL, "quality": r.Quality})
-	cmd := mediaCommand(ctx, p.Python, "-c", galleryScript, string(request), dir, fmt.Sprint(maxJobFiles))
-	var out, diagnostic boundedOutput
-	cmd.Stdout, cmd.Stderr = &out, &diagnostic
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if p.Fallback == nil || ctx.Err() != nil || errors.Is(err, ErrSize) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
 	}
-	if err != nil {
-		message := strings.ToLower(string(diagnostic.data))
-		if strings.Contains(message, "login") || strings.Contains(message, "sign in") || strings.Contains(message, "authentication") {
-			return nil, ErrGalleryLogin
+	// Remove partial primary output before sharing the job's budget with fallback.
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		return nil, readErr
+	}
+	for _, entry := range entries {
+		if cleanErr := os.RemoveAll(filepath.Join(dir, entry.Name())); cleanErr != nil {
+			return nil, cleanErr
 		}
-		return nil, fmt.Errorf("gallery-dl: %w", err)
 	}
-	var files []string
-	if err := json.Unmarshal(out.data, &files); err != nil {
-		return nil, errors.New("invalid gallery output")
-	}
-	if len(files) == 0 || len(files) > maxJobFiles {
-		return nil, errors.New("invalid gallery file count")
-	}
-	seen := map[string]bool{}
-	for i, path := range files {
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || filepath.Dir(path) != dir || seen[path] {
-			return nil, errors.New("invalid gallery path")
+	files, fallbackErr := p.Fallback.Run(ctx, r, dir)
+	if fallbackErr != nil {
+		if errors.Is(err, ErrCollection) {
+			return nil, fmt.Errorf("collection fallback failed: %w", fallbackErr)
 		}
-		seen[path] = true
-		if MediaType(path, "video") != "photo" {
-			files[i], err = compatibleVideo(ctx, path, r.Mode == "mute")
-			if err != nil {
-				return nil, err
-			}
-		}
+		return nil, errors.Join(err, fallbackErr)
 	}
 	return files, nil
 }
@@ -105,7 +59,7 @@ func MediaType(path, fallback string) string {
 
 // The limit covers all gallery files and conversion intermediates together.
 func watchSize(ctx context.Context, dir string) (context.Context, func()) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -126,11 +80,11 @@ func watchSize(ctx context.Context, dir string) (context.Context, func()) {
 					return nil
 				})
 				if size > maxJobBytes {
-					cancel()
+					cancel(ErrSize)
 					return
 				}
 			}
 		}
 	}()
-	return ctx, func() { cancel(); <-done }
+	return ctx, func() { cancel(nil); <-done }
 }

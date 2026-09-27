@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"github.com/mhmdxsadk/snatcher/internal/security"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,5 +142,42 @@ func TestGalleryLinks(t *testing.T) {
 	handler.ServeHTTP(w, httptest.NewRequest("GET", tampered, nil))
 	if w.Code != 403 {
 		t.Fatalf("item substitution accepted: %d", w.Code)
+	}
+}
+
+func TestDownloadOriginBehindTrustedProxy(t *testing.T) {
+	m, err := download.New(t.TempDir(), testDownloadRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	j, _ := m.Submit(download.Request{})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		v, _ := m.Get(j.ID)
+		if v.Status == download.StatusCompleted {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	key := strings.Repeat("k", 32)
+	cfg := security.Config{APIKey: key, IPPerMinute: 20, IPBurst: 5, GlobalPerMinute: 60, GlobalBurst: 10, MaxConcurrent: 4, MaxClients: 100, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.1/32")}}
+	h := security.New(cfg).Wrap(NewHandler(m, key))
+	for _, peer := range []string{"172.30.0.1:1234", "192.0.2.1:1234"} {
+		r := httptest.NewRequest("GET", "http://snatcher.example/v1/jobs/"+j.ID, nil)
+		r.RemoteAddr = peer
+		r.Header.Set("X-API-Key", key)
+		r.Header.Set("X-Forwarded-Proto", "https")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		var result struct{ Items []Item }
+		json.Unmarshal(w.Body.Bytes(), &result)
+		scheme := "http://"
+		if strings.HasPrefix(peer, "172.30.") {
+			scheme = "https://"
+		}
+		if w.Code != 200 || len(result.Items) != 1 || !strings.HasPrefix(result.Items[0].URL, scheme+"snatcher.example/download/") {
+			t.Fatalf("%s: %s", peer, w.Body)
+		}
 	}
 }

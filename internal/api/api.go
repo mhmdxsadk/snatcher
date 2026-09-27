@@ -97,6 +97,11 @@ func NewHandler(d *download.Manager, key string) http.Handler {
 
 		job, err := d.Submit(download.Request{URL: source, Quality: options.Quality, Mode: options.Mode, AudioFormat: options.AudioFormat})
 		if err != nil {
+			if errors.Is(err, download.ErrStorage) {
+				w.Header().Set("Retry-After", "60")
+				writeError(w, http.StatusServiceUnavailable, "storage_full", "Download storage is full. Retry after completed downloads expire.")
+				return
+			}
 			if !errors.Is(err, download.ErrFull) {
 				writeError(w, http.StatusInternalServerError, "job_failed", "Unable to create download job.")
 				return

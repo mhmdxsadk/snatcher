@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +22,7 @@ func arguments(r Request, dir string) []string {
 			format += "[height<=?" + r.Quality + "]"
 		}
 	}
-	args := []string{"--ignore-config", "--no-playlist", "--playlist-items", "1", "--no-progress", "--no-warnings", "--no-cache-dir", "--no-remote-components", "--js-runtimes", "node", "--socket-timeout", "20", "--retries", "3", "--max-filesize", "512M", "--print", "after_move:%(filepath)j", "--no-simulate", "-P", dir, "-o", "%(title).100B [%(id)s].%(ext)s"}
+	args := []string{"--ignore-config", "--no-playlist", "--no-progress", "--no-warnings", "--no-cache-dir", "--no-remote-components", "--js-runtimes", "node", "--socket-timeout", "20", "--retries", "3", "--max-filesize", "512M", "--print", "after_move:%(filepath)j", "--no-simulate", "-P", dir, "-o", "%(title).100B [%(id)s].%(ext)s"}
 	if r.Mode == "audio" {
 		args = append(args, "-f", "ba/b", "-x", "--audio-format", r.AudioFormat)
 	} else {
@@ -44,13 +43,33 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 func (y YTDLP) Run(ctx context.Context, r Request, dir string) (string, error) {
 	ctx, stop := watchSize(ctx, dir)
 	defer stop()
+	// A collection is not a successful single-video download. Resolve its full
+	// contents through the fallback, including images omitted by video extractors.
+	probe := mediaCommand(ctx, y.Binary, "--ignore-config", "--no-playlist", "--flat-playlist", "--playlist-end", "21", "--no-cache-dir", "--no-remote-components", "--js-runtimes", "node", "--socket-timeout", "20", "--retries", "3", "--dump-single-json", "--", r.URL)
+	var metadata metadataOutput
+	probe.Stdout = &metadata
+	if err := runMedia(probe); err != nil {
+		if ctx.Err() != nil {
+			return "", context.Cause(ctx)
+		}
+		return "", err
+	}
+	var info struct {
+		Type    string          `json:"_type"`
+		Entries json.RawMessage `json:"entries"`
+	}
+	if metadata.overflow || json.Unmarshal(metadata.data, &info) != nil {
+		return "", errors.New("invalid downloader metadata")
+	}
+	if info.Type == "playlist" || info.Type == "multi_video" || (len(info.Entries) > 0 && string(info.Entries) != "null") {
+		return "", ErrCollection
+	}
 	cmd := mediaCommand(ctx, y.Binary, arguments(r, dir)...)
 	var out boundedOutput
 	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
-	err := cmd.Run()
+	err := runMedia(cmd)
 	if ctx.Err() != nil {
-		return "", ctx.Err()
+		return "", context.Cause(ctx)
 	}
 	if err != nil {
 		return "", err
@@ -61,8 +80,8 @@ func (y YTDLP) Run(ctx context.Context, r Request, dir string) (string, error) {
 		return "", errors.New("invalid downloader output")
 	}
 	path = filepath.Clean(path)
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || filepath.Dir(path) != dir {
+	stat, err := os.Lstat(path)
+	if err != nil || !stat.Mode().IsRegular() || filepath.Dir(path) != dir {
 		return "", errors.New("invalid downloader path")
 	}
 	if r.Mode != "audio" {
@@ -70,3 +89,22 @@ func (y YTDLP) Run(ctx context.Context, r Request, dir string) (string, error) {
 	}
 	return path, nil
 }
+
+// Bound extraction metadata independently of the much smaller file-path output.
+type metadataOutput struct {
+	data     []byte
+	overflow bool
+}
+
+func (b *metadataOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	const limit = 4 << 20
+	remaining := limit - len(b.data)
+	if n > remaining {
+		b.overflow = true
+	}
+	b.data = append(b.data, p[:min(n, remaining)]...)
+	return n, nil
+}
+
+var ErrCollection = errors.New("this collection requires the Cobalt fallback")
