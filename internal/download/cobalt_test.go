@@ -1,7 +1,11 @@
 package download
 
 import (
+	"errors"
+	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"bytes"
 	"context"
@@ -130,5 +134,156 @@ func TestCobaltRejectsIncompleteHTTPBody(t *testing.T) {
 	_, _, err := fetchCobaltMedia(context.Background(), cobaltItem{URL: server.URL, Type: "photo"}, Request{}, t.TempDir(), 0, 1000)
 	if err == nil {
 		t.Fatal("accepted incomplete HTTP body")
+	}
+}
+
+func TestCobaltMediaFailureDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		length string
+		want   string
+	}{
+		{"forbidden", 403, "0", "item 2 returned HTTP 403"},
+		{"upstream failure", 502, "0", "item 2 returned HTTP 502"},
+		{"oversize", 200, "200", "item 2 exceeds remaining size budget: content length 200, remaining 100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", tc.length)
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+			_, _, err := fetchCobaltMedia(context.Background(), cobaltItem{URL: server.URL + "/?sig=private"}, Request{}, t.TempDir(), 1, 100)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "private") {
+				t.Fatalf("%v", err)
+			}
+		})
+	}
+}
+
+func TestCobaltRetriesOnlyFailedGalleryItem(t *testing.T) {
+	var photo bytes.Buffer
+	if err := jpeg.Encode(&photo, image.NewRGBA(image.Rect(0, 0, 2, 2)), nil); err != nil {
+		t.Fatal(err)
+	}
+	var calls [16]atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			var items []cobaltItem
+			for i := 0; i < 16; i++ {
+				items = append(items, cobaltItem{Type: "photo", URL: server.URL + "/" + strconv.Itoa(i)})
+			}
+			json.NewEncoder(w).Encode(cobaltResponse{Status: "picker", Picker: items})
+			return
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/"))
+		if err != nil || index < 0 || index >= 16 {
+			w.WriteHeader(404)
+			return
+		}
+		attempt := calls[index].Add(1)
+		if index == 8 && attempt == 1 {
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(photo.Bytes())
+	}))
+	defer server.Close()
+	files, err := (&Cobalt{Endpoint: server.URL}).Run(context.Background(), Request{Mode: "auto"}, t.TempDir())
+	if err != nil || len(files) != 16 {
+		t.Fatalf("files=%d error=%v", len(files), err)
+	}
+	for i, file := range files {
+		want := int32(1)
+		if i == 8 {
+			want = 2
+		}
+		if calls[i].Load() != want {
+			t.Errorf("item %d requests=%d", i+1, calls[i].Load())
+		}
+		data, err := os.ReadFile(file)
+		if err != nil || !bytes.Equal(data, photo.Bytes()) {
+			t.Fatalf("item %d invalid: %v", i+1, err)
+		}
+	}
+}
+
+func TestCobaltMediaRetryLimits(t *testing.T) {
+	for _, status := range []int{403, 404, 500} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(status) }))
+			defer server.Close()
+			dir := t.TempDir()
+			_, _, err := fetchCobaltMedia(context.Background(), cobaltItem{URL: server.URL}, Request{}, dir, 8, 1000)
+			want := int32(1)
+			if status == 500 {
+				want = 3
+			}
+			if err == nil || calls.Load() != want || !strings.Contains(err.Error(), "item 9 returned HTTP "+strconv.Itoa(status)) {
+				t.Fatalf("calls=%d err=%v", calls.Load(), err)
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 0 {
+				t.Fatal("failed requests left files")
+			}
+		})
+	}
+}
+
+func TestCobaltMediaRetryCancellation(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	dir := t.TempDir()
+	go func() {
+		_, _, err := fetchCobaltMedia(ctx, cobaltItem{URL: server.URL}, Request{}, dir, 0, 1000)
+		done <- err
+	}()
+	<-started
+	// Allow the first response to finish, then cancel during backoff.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt backoff")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("requests after cancellation: %d", calls.Load())
+	}
+}
+
+func TestMediaRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		value string
+		delay time.Duration
+		retry bool
+	}{
+		{"", 0, true}, {"bad", 0, true}, {"5", 5 * time.Second, true}, {"999999999", 0, false},
+		{now.Add(10 * time.Second).Format(http.TimeFormat), 10 * time.Second, true},
+		{now.Add(-time.Second).Format(http.TimeFormat), 0, true},
+		{now.Add(time.Minute).Format(http.TimeFormat), time.Minute, false},
+	} {
+		delay, retry := mediaRetryDelay(tc.value, now)
+		if delay != tc.delay || retry != tc.retry {
+			t.Errorf("%q: %s %v", tc.value, delay, retry)
+		}
 	}
 }

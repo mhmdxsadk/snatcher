@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -118,7 +119,63 @@ func (c *Cobalt) Run(ctx context.Context, r Request, dir string) ([]string, erro
 	return files, nil
 }
 
+// Retry only transient HTTP failures, before any output file is created.
+// Completed gallery items stay on disk; a failed item is never silently omitted.
 func fetchCobaltMedia(ctx context.Context, item cobaltItem, r Request, dir string, index int, budget int64) (string, int64, error) {
+	const attempts = 3
+	for attempt := 0; ; attempt++ {
+		path, size, err := fetchCobaltMediaAttempt(ctx, item, r, dir, index, budget)
+		if ctx.Err() != nil {
+			return "", 0, context.Cause(ctx)
+		}
+		var transient *mediaRetryError
+		if !errors.As(err, &transient) {
+			return path, size, err
+		}
+		if attempt == attempts-1 {
+			return "", 0, fmt.Errorf("after %d attempts: %w", attempts, err)
+		}
+		delay := time.Second * time.Duration(1<<attempt)
+		if transient.after > delay {
+			delay = transient.after
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", 0, context.Cause(ctx)
+		case <-timer.C:
+		}
+	}
+}
+
+type mediaRetryError struct {
+	err   error
+	after time.Duration
+}
+
+func (e *mediaRetryError) Error() string { return e.err.Error() }
+func (e *mediaRetryError) Unwrap() error { return e.err }
+
+// Do not retry sooner than Retry-After or wait indefinitely on an upstream.
+func mediaRetryDelay(value string, now time.Time) (time.Duration, bool) {
+	var delay time.Duration
+	if value != "" {
+		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+			if seconds > 30 {
+				return 0, false
+			}
+			if seconds > 0 {
+				delay = time.Duration(seconds) * time.Second
+			}
+		} else if date, err := http.ParseTime(value); err == nil {
+			delay = max(0, date.Sub(now))
+		}
+	}
+	return delay, delay <= 30*time.Second
+}
+
+func fetchCobaltMediaAttempt(ctx context.Context, item cobaltItem, r Request, dir string, index int, budget int64) (string, int64, error) {
 	u, err := url.Parse(item.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
 		return "", 0, errors.New("invalid Cobalt media URL")
@@ -142,8 +199,18 @@ func fetchCobaltMedia(ctx context.Context, item cobaltItem, r Request, dir strin
 		return "", 0, errors.New("Cobalt media request failed")
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 || resp.ContentLength > budget {
-		return "", 0, errors.New("Cobalt media unavailable or too large")
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("Cobalt media item %d returned HTTP %d", index+1, resp.StatusCode)
+		switch resp.StatusCode {
+		case 408, 429, 500, 502, 503, 504:
+			if delay, retry := mediaRetryDelay(resp.Header.Get("Retry-After"), time.Now()); retry {
+				return "", 0, &mediaRetryError{err: err, after: delay}
+			}
+		}
+		return "", 0, err
+	}
+	if resp.ContentLength > budget {
+		return "", 0, fmt.Errorf("Cobalt media item %d exceeds remaining size budget: content length %d, remaining %d", index+1, resp.ContentLength, budget)
 	}
 	head := make([]byte, 512)
 	n, err := io.ReadFull(resp.Body, head)
