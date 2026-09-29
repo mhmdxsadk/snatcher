@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"mime"
 	"net/http"
 	"net/url"
@@ -22,6 +23,7 @@ func downloadSignature(key, id, expiry string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
+	transfers := make(chan struct{}, 4)
 	mux.HandleFunc("GET /"+version.API+"/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		job, ok := d.Get(r.PathValue("id"))
 		if !ok {
@@ -94,6 +96,14 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 			writeError(w, http.StatusNotFound, "not_found", "Download not found.")
 			return
 		}
+		select {
+		case transfers <- struct{}{}:
+			defer func() { <-transfers }()
+		default:
+			w.Header().Set("Retry-After", "5")
+			writeError(w, http.StatusTooManyRequests, "download_busy", "Download capacity reached. Try again shortly.")
+			return
+		}
 		file, err := os.Open(job.Files[index])
 		if err != nil {
 			writeError(w, http.StatusNotFound, "not_found", "Download not found.")
@@ -105,11 +115,50 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 			writeError(w, http.StatusInternalServerError, "read_failed", "Cannot read download.")
 			return
 		}
-		http.NewResponseController(w).SetWriteDeadline(time.Time{})
+		// Bound both stalled writes and total lifetime, including link expiry.
+		deadline := time.Now().Add(15 * time.Minute)
+		if expiry := time.Unix(timestamp, 0); expiry.Before(deadline) {
+			deadline = expiry
+		}
+		writer := &transferWriter{ResponseWriter: w, deadline: deadline}
+		if err := writer.refreshDeadline(); err != nil {
+			writeError(w, http.StatusInternalServerError, "transfer_failed", "Unable to start download.")
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(job.Files[index])}))
-		http.ServeContent(w, r, filepath.Base(job.Files[index]), info.ModTime(), file)
+		http.ServeContent(writer, r, filepath.Base(job.Files[index]), info.ModTime(), file)
 	}
 	mux.HandleFunc("/download/{id}", serveDownload)
 	mux.HandleFunc("/download/{id}/{index}", serveDownload)
+}
+
+// transferWriter deliberately does not implement ReaderFrom: every write must
+// refresh the idle deadline, including transfers that could otherwise use sendfile.
+type transferWriter struct {
+	http.ResponseWriter
+	deadline time.Time
+}
+
+func (w *transferWriter) refreshDeadline() error {
+	deadline := time.Now().Add(30 * time.Second)
+	if w.deadline.Before(deadline) {
+		deadline = w.deadline
+	}
+	err := http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+	// In-memory test recorders do not implement network deadlines.
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
+func (w *transferWriter) Write(p []byte) (int, error) {
+	if !time.Now().Before(w.deadline) {
+		return 0, os.ErrDeadlineExceeded
+	}
+	if err := w.refreshDeadline(); err != nil {
+		return 0, err
+	}
+	return w.ResponseWriter.Write(p)
 }

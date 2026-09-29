@@ -146,7 +146,7 @@ func TestCobaltMediaFailureDiagnostics(t *testing.T) {
 	}{
 		{"forbidden", 403, "0", "item 2 returned HTTP 403"},
 		{"upstream failure", 502, "0", "item 2 returned HTTP 502"},
-		{"oversize", 200, "200", "item 2 exceeds remaining size budget: content length 200, remaining 100"},
+		{"oversize", 200, "200", "item 2: download exceeded size limit (content length 200, remaining 100)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -285,5 +285,28 @@ func TestMediaRetryAfter(t *testing.T) {
 		if delay != tc.delay || retry != tc.retry {
 			t.Errorf("%q: %s %v", tc.value, delay, retry)
 		}
+	}
+}
+
+func TestCobaltSizeErrors(t *testing.T) {
+	for _, chunked := range []bool{false, true} {
+		t.Run(strconv.FormatBool(chunked), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if chunked {
+					w.(http.Flusher).Flush()
+				}
+				w.Write(append([]byte{0xff, 0xd8, 0xff}, bytes.Repeat([]byte{0}, 197)...))
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			_, _, err := fetchCobaltMedia(context.Background(), cobaltItem{URL: server.URL}, Request{}, dir, 0, 100)
+			if !errors.Is(err, ErrSize) {
+				t.Fatalf("wanted size error, got %v", err)
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 0 {
+				t.Fatal("oversized partial file survived")
+			}
+		})
 	}
 }

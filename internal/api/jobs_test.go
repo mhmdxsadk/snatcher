@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/mhmdxsadk/snatcher/internal/security"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +181,99 @@ func TestDownloadOriginBehindTrustedProxy(t *testing.T) {
 		if w.Code != 200 || len(result.Items) != 1 || !strings.HasPrefix(result.Items[0].URL, scheme+"snatcher.example/download/") {
 			t.Fatalf("%s: %s", peer, w.Body)
 		}
+	}
+}
+
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadline time.Time
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (w *deadlineRecorder) SetWriteDeadline(d time.Time) error {
+	w.deadline = d
+	return nil
+}
+func (w *deadlineRecorder) Write(p []byte) (int, error) {
+	if w.entered != nil {
+		w.entered <- struct{}{}
+		<-w.release
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+func TestTransferDeadlines(t *testing.T) {
+	recorder := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	writer := &transferWriter{ResponseWriter: recorder, deadline: time.Now().Add(time.Minute)}
+	before := time.Now()
+	if _, err := writer.Write([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.deadline.Before(before.Add(30*time.Second)) || recorder.deadline.After(time.Now().Add(30*time.Second)) {
+		t.Fatal("idle deadline not applied")
+	}
+	writer.deadline = time.Now().Add(time.Second)
+	writer.Write([]byte("second"))
+	if !recorder.deadline.Equal(writer.deadline) {
+		t.Fatal("write deadline exceeds total/expiry deadline")
+	}
+	writer.deadline = time.Now().Add(-time.Second)
+	if _, err := writer.Write([]byte("expired")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expired transfer continued: %v", err)
+	}
+}
+
+func TestTransferCapacity(t *testing.T) {
+	m, err := download.New(t.TempDir(), testDownloadRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	job, err := m.Submit(download.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 1000; i++ {
+		job, _ = m.Get(job.ID)
+		if job.Status == download.StatusCompleted {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if job.Status != download.StatusCompleted {
+		t.Fatal(job)
+	}
+	expiry := strconv.FormatInt(job.Expires.Unix(), 10)
+	link := "/download/" + job.ID + "?exp=" + expiry + "&sig=" + downloadSignature("key", job.ID, expiry)
+	h := NewHandler(m, "key")
+	entered, release, done := make(chan struct{}, 4), make(chan struct{}), make(chan struct{}, 4)
+	defer close(release)
+	for i := 0; i < 4; i++ {
+		go func() {
+			w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder(), entered: entered, release: release}
+			h.ServeHTTP(w, httptest.NewRequest("GET", link, nil))
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("transfer did not start")
+		}
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", link, nil))
+	if w.Code != 429 || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("unbounded transfers: %d", w.Code)
+	}
+	// Release one slot and verify another request can complete.
+	release <- struct{}{}
+	<-done
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", link, nil))
+	if w.Code != 200 {
+		t.Fatal(w.Code)
 	}
 }

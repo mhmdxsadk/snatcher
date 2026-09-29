@@ -23,7 +23,7 @@ services:
       - cobalt
 
   cobalt:
-    image: ghcr.io/imputnet/cobalt:11
+    image: ghcr.io/zimpatrick/cobalt:staging
     restart: unless-stopped
     init: true
     read_only: true

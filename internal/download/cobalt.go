@@ -210,7 +210,7 @@ func fetchCobaltMediaAttempt(ctx context.Context, item cobaltItem, r Request, di
 		return "", 0, err
 	}
 	if resp.ContentLength > budget {
-		return "", 0, fmt.Errorf("Cobalt media item %d exceeds remaining size budget: content length %d, remaining %d", index+1, resp.ContentLength, budget)
+		return "", 0, fmt.Errorf("Cobalt media item %d: %w (content length %d, remaining %d)", index+1, ErrSize, resp.ContentLength, budget)
 	}
 	head := make([]byte, 512)
 	n, err := io.ReadFull(resp.Body, head)
@@ -255,7 +255,11 @@ func fetchCobaltMediaAttempt(ctx context.Context, item cobaltItem, r Request, di
 	}
 	written, copyErr := io.Copy(file, io.LimitReader(io.MultiReader(bytes.NewReader(head), resp.Body), budget+1))
 	closeErr := file.Close()
-	if copyErr != nil || closeErr != nil || written > budget || (resp.ContentLength >= 0 && written != resp.ContentLength) {
+	if written > budget {
+		os.Remove(path)
+		return "", 0, ErrSize
+	}
+	if copyErr != nil || closeErr != nil || (resp.ContentLength >= 0 && written != resp.ContentLength) {
 		os.Remove(path)
 		return "", 0, errors.New("Cobalt download failed or exceeded size limit")
 	}
