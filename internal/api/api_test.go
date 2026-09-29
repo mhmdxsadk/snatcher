@@ -18,22 +18,23 @@ func TestRequestValidation(t *testing.T) {
 		status                                int
 		code, allow                           string
 	}{
-		{"method", "GET", "/v1/snatch", "", "", 405, "method_not_allowed", "POST"},
+		{"method", "GET", "/v2/snatch", "", "", 405, "method_not_allowed", "POST"},
 		{"health method", "POST", "/health", "", "", 405, "method_not_allowed", "GET, HEAD"},
 		{"root method", "POST", "/", "", "", 405, "method_not_allowed", "GET, HEAD"},
-		{"renamed route", "POST", "/v1/snatcher", "application/json", `{}`, 404, "not_found", ""},
-		{"trailing slash", "POST", "/v1/snatch/", "application/json", `{}`, 404, "not_found", ""},
+		{"renamed route", "POST", "/v2/snatcher", "application/json", `{}`, 404, "not_found", ""},
+		{"trailing slash", "POST", "/v2/snatch/", "application/json", `{}`, 404, "not_found", ""},
 		{"old route", "POST", "/download", "application/json", `{}`, 404, "not_found", ""},
 		{"unversioned route", "POST", "/snatch", "application/json", `{}`, 404, "not_found", ""},
-		{"unsupported version", "POST", "/v2/snatch", "application/json", `{}`, 404, "not_found", ""},
+		{"retired version", "POST", "/v1/snatch", "application/json", `{}`, 404, "not_found", ""},
+		{"unsupported version", "POST", "/v3/snatch", "application/json", `{}`, 404, "not_found", ""},
 		{"unknown route", "GET", "/missing", "", "", 404, "not_found", ""},
-		{"content type", "POST", "/v1/snatch", "text/plain", `{}`, 415, "invalid_content_type", ""},
-		{"null", "POST", "/v1/snatch", "application/json", `null`, 400, "invalid_request", ""},
-		{"multiple values", "POST", "/v1/snatch", "application/json", `{} {}`, 400, "invalid_request", ""},
-		{"unknown field", "POST", "/v1/snatch", "application/json", `{"url":"https://example.com","extra":true}`, 400, "invalid_request", ""},
-		{"missing URL", "POST", "/v1/snatch", "application/json", `{}`, 400, "invalid_url", ""},
-		{"credentials", "POST", "/v1/snatch", "application/json", `{"url":"https://user:password@example.com"}`, 400, "invalid_url", ""},
-		{"oversized", "POST", "/v1/snatch", "application/json", `{"url":"https://example.com/` + strings.Repeat("x", 16<<10) + `"}`, 413, "request_too_large", ""},
+		{"content type", "POST", "/v2/snatch", "text/plain", `{}`, 415, "invalid_content_type", ""},
+		{"null", "POST", "/v2/snatch", "application/json", `null`, 400, "invalid_request", ""},
+		{"multiple values", "POST", "/v2/snatch", "application/json", `{} {}`, 400, "invalid_request", ""},
+		{"unknown field", "POST", "/v2/snatch", "application/json", `{"url":"https://example.com","extra":true}`, 400, "invalid_request", ""},
+		{"missing URL", "POST", "/v2/snatch", "application/json", `{}`, 400, "invalid_url", ""},
+		{"credentials", "POST", "/v2/snatch", "application/json", `{"url":"https://user:password@example.com"}`, 400, "invalid_url", ""},
+		{"oversized", "POST", "/v2/snatch", "application/json", `{"url":"https://example.com/` + strings.Repeat("x", 16<<10) + `"}`, 413, "request_too_large", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,7 +93,7 @@ func TestInvalidOptions(t *testing.T) {
 		{`,"youtubeVideoCodec":"av1"`, "invalid_request"},
 	} {
 		t.Run(tt.fields, func(t *testing.T) {
-			r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
+			r := httptest.NewRequest("POST", "/v2/snatch", strings.NewReader(`{"url":"https://example.com/video"`+tt.fields+`}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			NewHandler(nil, "").ServeHTTP(w, r)
@@ -143,7 +144,7 @@ func TestServiceInfo(t *testing.T) {
 			t.Errorf("metadata = %v, want %v", got, want)
 		}
 	}
-	resp, err := server.Client().Post(server.URL+"/v1/snatch", "application/json", strings.NewReader(`{}`))
+	resp, err := server.Client().Post(server.URL+"/v2/snatch", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -27,11 +27,11 @@ def request(path, body=None, authenticated=True):
 
 
 def job(path):
-    result = request("/v1/snatch", {"url": ORIGIN + path})
+    result = request("/v2/snatch", {"url": ORIGIN + path})
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         time.sleep(3)
-        result = request("/v1/jobs/" + result["id"])
+        result = request("/v2/jobs/" + result["id"])
         if result["status"] in ("completed", "failed", "cancelled"):
             return result
     raise AssertionError("job did not finish")

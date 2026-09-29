@@ -30,7 +30,7 @@ func TestDownloadJobLifecycle(t *testing.T) {
 	defer m.Close()
 	h := NewHandler(m, "test secret")
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/snatch", strings.NewReader(`{"url":"https://example.com/video"}`))
+	r := httptest.NewRequest("POST", "/v2/snatch", strings.NewReader(`{"url":"https://example.com/video"}`))
 	r.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(w, r)
 	if w.Code != 202 {
@@ -117,7 +117,7 @@ func TestGalleryLinks(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest("GET", "/v1/jobs/"+job.ID, nil))
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/v2/jobs/"+job.ID, nil))
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
@@ -164,7 +164,7 @@ func TestDownloadOriginBehindTrustedProxy(t *testing.T) {
 	cfg := security.Config{APIKey: key, IPPerMinute: 20, IPBurst: 5, GlobalPerMinute: 60, GlobalBurst: 10, MaxConcurrent: 4, MaxClients: 100, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.1/32")}}
 	h := security.New(cfg).Wrap(NewHandler(m, key))
 	for _, peer := range []string{"172.30.0.1:1234", "192.0.2.1:1234"} {
-		r := httptest.NewRequest("GET", "http://snatcher.example/v1/jobs/"+j.ID, nil)
+		r := httptest.NewRequest("GET", "http://snatcher.example/v2/jobs/"+j.ID, nil)
 		r.RemoteAddr = peer
 		r.Header.Set("X-API-Key", key)
 		r.Header.Set("X-Forwarded-Proto", "https")

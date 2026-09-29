@@ -14,7 +14,7 @@ func fixture() *Guard {
 	return New(Config{APIKey: strings.Repeat("k", 32), IPPerMinute: 20, IPBurst: 5, GlobalPerMinute: 60, GlobalBurst: 10, MaxConcurrent: 2, MaxClients: 100})
 }
 func request(h http.Handler, ip, auth string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("POST", "/v1/snatch", nil)
+	r := httptest.NewRequest("POST", "/v2/snatch", nil)
 	r.RemoteAddr = ip + ":1234"
 	if auth != "" {
 		r.Header.Set("X-API-Key", auth)
@@ -41,7 +41,7 @@ func TestAuthentication(t *testing.T) {
 	if w := request(h, "192.0.2.1", token()); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
-	r := httptest.NewRequest("POST", "/v1/snatch", nil)
+	r := httptest.NewRequest("POST", "/v2/snatch", nil)
 	r.RemoteAddr = "192.0.2.1:1"
 	r.Header.Add("X-API-Key", token())
 	r.Header.Add("X-API-Key", token())
@@ -50,7 +50,7 @@ func TestAuthentication(t *testing.T) {
 	if w.Code != 401 {
 		t.Fatal(w.Code)
 	}
-	r = httptest.NewRequest("POST", "/v1/snatch", nil)
+	r = httptest.NewRequest("POST", "/v2/snatch", nil)
 	r.RemoteAddr = "192.0.2.1:1"
 	r.Header.Set("Authorization", "Bearer "+token())
 	w = httptest.NewRecorder()
@@ -149,7 +149,7 @@ func TestClientIP(t *testing.T) {
 		{"[::ffff:192.0.2.1]:4", "", "192.0.2.1"},
 		{"127.0.0.1:4", "malformed", ""},
 	} {
-		r := httptest.NewRequest("POST", "/v1/snatch", nil)
+		r := httptest.NewRequest("POST", "/v2/snatch", nil)
 		r.RemoteAddr = tt.peer
 		r.Header.Set("X-Forwarded-For", tt.xff)
 		ip, ok := g.clientIP(r)
@@ -190,7 +190,7 @@ func TestBoundedClientMemory(t *testing.T) {
 }
 
 func TestJobRoutesRequireAuthentication(t *testing.T) {
-	for _, path := range []string{"/v1/jobs/example", "/v1/jobs/example/cancel"} {
+	for _, path := range []string{"/v2/jobs/example", "/v2/jobs/example/cancel"} {
 		for _, key := range []string{"", token()} {
 			r := httptest.NewRequest("GET", path, nil)
 			r.Header.Set("X-API-Key", key)
@@ -222,7 +222,7 @@ func TestForwardedSchemeTrust(t *testing.T) {
 			if tt.trusted {
 				g.cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
 			}
-			r := httptest.NewRequest("GET", "/v1/jobs/test", nil)
+			r := httptest.NewRequest("GET", "/v2/jobs/test", nil)
 			r.RemoteAddr = "192.0.2.1:1234"
 			r.Header.Set("X-API-Key", token())
 			r.Header.Set("X-Forwarded-Proto", tt.proto)
@@ -249,7 +249,7 @@ func TestPollingDoesNotConsumeSubmissionQuota(t *testing.T) {
 	// All retained jobs can be polled at the Shortcut's three-second interval.
 	for tick := 0; tick < 100; tick++ {
 		for job := 0; job < 32; job++ {
-			r := httptest.NewRequest("GET", "/v1/jobs/example", nil)
+			r := httptest.NewRequest("GET", "/v2/jobs/example", nil)
 			r.RemoteAddr = "192.0.2.1:1234"
 			r.Header.Set("X-API-Key", token())
 			w := httptest.NewRecorder()
@@ -275,7 +275,7 @@ func TestPollingStillBounded(t *testing.T) {
 	h := g.Wrap(okHandler())
 	limited := false
 	for i := 0; i < 100; i++ {
-		r := httptest.NewRequest("GET", "/v1/jobs/example", nil)
+		r := httptest.NewRequest("GET", "/v2/jobs/example", nil)
 		r.Header.Set("X-API-Key", token())
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)

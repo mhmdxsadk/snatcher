@@ -22,7 +22,7 @@ curl http://127.0.0.1:8080/health
 Keep the loopback port binding and use an HTTPS reverse proxy or Tailscale for
 remote access.
 
-Submit a URL to `POST /v1/snatch` with your `X-API-Key`. Poll the returned job
+Submit a URL to `POST /v2/snatch` with your `X-API-Key`. Poll the returned job
 location, then download the completed files.
 
 ## Documentation
