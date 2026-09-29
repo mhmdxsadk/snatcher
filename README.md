@@ -12,7 +12,7 @@ Generate a key with:
 openssl rand -hex 32
 ```
 
-Build and start the services:
+Build and start the services:PR
 
 ```sh
 docker compose up -d --build
