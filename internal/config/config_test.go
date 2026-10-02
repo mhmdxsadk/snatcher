@@ -15,6 +15,7 @@ func TestSecurityConfig(t *testing.T) {
 		t.Fatalf("unexpected defaults: %+v", cfg.Security)
 	}
 	for _, tt := range []struct{ key, value string }{
+		{"JOB_TTL", "0"}, {"JOB_TTL", "30s"}, {"JOB_TTL", "25h"}, {"JOB_TTL", "no"},
 		{"COBALT_API", "file:///tmp/test"}, {"COBALT_API", "http://user:password@cobalt:9000"}, {"COBALT_API", "http://cobalt:9000/?key=value"}, {"COBALT_API_KEY", "key\nheader"},
 		{"STORAGE_LIMIT_BYTES", "garbage"}, {"STORAGE_LIMIT_BYTES", "0"}, {"STORAGE_LIMIT_BYTES", "1073741823"},
 		{"LISTEN", "localhost"}, {"LISTEN", "localhost:"}, {"LISTEN", ":invalid"}, {"LISTEN", ":65536"},

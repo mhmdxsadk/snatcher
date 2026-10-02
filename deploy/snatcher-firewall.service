@@ -1,0 +1,12 @@
+[Unit]
+Description=Snatcher container egress restrictions
+Before=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/snatcher-egress-firewall
+RemainAfterExit=yes
+
+[Install]
+RequiredBy=docker.service

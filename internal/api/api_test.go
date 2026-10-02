@@ -139,7 +139,7 @@ func TestServiceInfo(t *testing.T) {
 		if err := json.Unmarshal(body, &got); err != nil {
 			t.Fatal(err)
 		}
-		want := map[string]string{"name": "Snatcher", "version": version.Release, "api": version.API}
+		want := map[string]string{"name": "Snatcher", "api": version.API}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("metadata = %v, want %v", got, want)
 		}

@@ -21,13 +21,14 @@ const (
 	StatusCancelled       = "cancelled"
 	queueCapacity         = 8
 	maxJobs               = 32
-	jobTTL                = time.Hour
+	DefaultJobTTL         = 15 * time.Minute
 	jobTimeout            = 15 * time.Minute
 	maxJobBytes     int64 = 1 << 30
 )
 
 type Request struct{ URL, Quality, Mode, AudioFormat string }
 type Job struct {
+	Token     string    `json:"-"`
 	Files     []string  `json:"-"`
 	ID        string    `json:"id"`
 	Status    string    `json:"status"`
@@ -59,6 +60,7 @@ type Manager struct {
 	wg           sync.WaitGroup
 	root         string
 	runner       Runner
+	ttl          time.Duration
 	storageLimit int64
 	used         int64
 }
@@ -68,6 +70,13 @@ func New(root string, runner Runner) (*Manager, error) {
 }
 
 func NewWithStorageLimit(root string, runner Runner, limit int64) (*Manager, error) {
+	return NewWithOptions(root, runner, limit, DefaultJobTTL)
+}
+
+func NewWithOptions(root string, runner Runner, limit int64, ttl time.Duration) (*Manager, error) {
+	if ttl < time.Minute || ttl > 24*time.Hour {
+		return nil, errors.New("job TTL must be between 1 minute and 24 hours")
+	}
 	if limit < maxJobBytes {
 		return nil, errors.New("storage limit must reserve at least 1 GiB for a job")
 	}
@@ -84,7 +93,7 @@ func NewWithStorageLimit(root string, runner Runner, limit int64) (*Manager, err
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &Manager{jobs: map[string]*entry{}, queue: make(chan *entry, queueCapacity), ctx: ctx, cancel: cancel, root: root, runner: runner, storageLimit: limit}
+	m := &Manager{jobs: map[string]*entry{}, queue: make(chan *entry, queueCapacity), ctx: ctx, cancel: cancel, root: root, runner: runner, storageLimit: limit, ttl: ttl}
 	m.wg.Add(2)
 	go m.loop()
 	go m.cleanLoop()
@@ -107,12 +116,16 @@ func (m *Manager) Submit(r Request) (Job, error) {
 	if m.used > m.storageLimit-maxJobBytes {
 		return Job{}, ErrStorage
 	}
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return Job{}, err
+	}
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return Job{}, err
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	e := &entry{Job: Job{ID: hex.EncodeToString(id[:]), Status: StatusQueued}, request: r, ctx: ctx, cancel: cancel}
+	e := &entry{Job: Job{Token: hex.EncodeToString(token[:]), ID: hex.EncodeToString(id[:]), Status: StatusQueued}, request: r, ctx: ctx, cancel: cancel}
 	select {
 	case m.queue <- e:
 		m.jobs[e.ID] = e
@@ -145,7 +158,7 @@ func (m *Manager) Cancel(id string) (Job, bool) {
 	if e.Status == StatusQueued || e.Status == StatusRunning {
 		e.cancel()
 		e.Status = StatusCancelled
-		e.Expires = time.Now().Add(jobTTL)
+		e.Expires = time.Now().Add(m.ttl)
 	}
 	snapshot := e.Job
 	snapshot.Files = append([]string(nil), e.Files...)
@@ -288,7 +301,7 @@ func (m *Manager) run(e *entry) {
 		status, message = StatusCancelled, ""
 	}
 	e.Status, e.Error = status, message
-	e.Expires = time.Now().Add(jobTTL)
+	e.Expires = time.Now().Add(m.ttl)
 	if status == StatusCompleted {
 		e.bytes = retained
 		m.used += retained
@@ -308,3 +321,32 @@ func (m *Manager) run(e *entry) {
 	e.active = false
 	m.mu.Unlock()
 }
+
+// Delete removes a terminal job. Active jobs must be cancelled and finish first.
+func (m *Manager) Delete(id string) error {
+	m.mu.Lock()
+	e, ok := m.jobs[id]
+	if !ok || expired(e, time.Now()) {
+		m.mu.Unlock()
+		return os.ErrNotExist
+	}
+	if e.active || e.Status == StatusQueued || e.Status == StatusRunning {
+		m.mu.Unlock()
+		return ErrActive
+	}
+	e.active = true // Prevent cleanup from deleting the same directory concurrently.
+	m.mu.Unlock()
+	err := os.RemoveAll(filepath.Join(m.root, id))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e.active = false
+	if err != nil {
+		return err
+	}
+	e.cancel()
+	delete(m.jobs, id)
+	m.used -= e.bytes
+	return nil
+}
+
+var ErrActive = errors.New("job is still active")

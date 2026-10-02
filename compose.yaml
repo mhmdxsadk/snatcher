@@ -3,6 +3,16 @@ services:
     build: .
     image: ghcr.io/mhmdxsadk/snatcher:latest
     restart: unless-stopped
+    cpus: 2
+    mem_limit: 3g
+    memswap_limit: 3g
+    pids_limit: 256
+    dns: [1.1.1.1]
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     read_only: true
     tmpfs:
       - /tmp:mode=1777,size=2g
@@ -15,16 +25,35 @@ services:
       - "127.0.0.1:8080:8080/tcp"
     environment:
       SNATCHER_API_KEY: "GENERATE_ME" # Generate with: openssl rand -hex 32
+      JOB_TTL: "${JOB_TTL:-15m}"
       COBALT_API: "http://cobalt:9000/"
       # The host reverse proxy reaches this container through the bridge gateway.
-      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-172.30.0.1/32}"
+      TRUSTED_PROXIES: "172.30.0.1/32"
       STORAGE_LIMIT_BYTES: "1879048192" # 1792 MiB; reserve headroom in the 2 GiB tmpfs.
+    networks:
+      default:
+        ipv4_address: 172.30.0.2
     depends_on:
       - cobalt
 
   cobalt:
     image: ghcr.io/zimpatrick/cobalt:staging
     restart: unless-stopped
+    cpus: 1
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    dns: [1.1.1.1]
+    networks:
+      default:
+        ipv4_address: 172.30.0.3
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     init: true
     read_only: true
     tmpfs:
@@ -32,11 +61,14 @@ services:
     environment:
       API_URL: "http://cobalt:9000/"
 
-# A stable gateway makes proxy trust explicit. Change both subnet and
-# TRUSTED_PROXIES if this subnet overlaps an existing network.
+# Addresses and bridge name must match deploy/egress-firewall.sh.
+# Install the firewall before starting this stack; see the Security wiki.
 networks:
   default:
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-snatcher
     ipam:
       config:
-        - subnet: "${SNATCHER_SUBNET:-172.30.0.0/24}"
-          gateway: "${SNATCHER_GATEWAY:-172.30.0.1}"
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1

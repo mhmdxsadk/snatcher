@@ -292,3 +292,61 @@ func TestQueuedJobRechecksStorage(t *testing.T) {
 		t.Fatal(j.Error)
 	}
 }
+
+func TestRetentionAndDeletion(t *testing.T) {
+	m, err := NewWithOptions(t.TempDir(), runnerFunc(func(_ context.Context, _ Request, dir string) (string, error) {
+		path := filepath.Join(dir, "clip.mp4")
+		return path, os.WriteFile(path, []byte("media"), 0600)
+	}), DefaultStorageLimit, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	started := time.Now()
+	submitted, _ := m.Submit(Request{})
+	job := awaitStatus(t, m, submitted.ID, StatusCompleted)
+	if job.Expires.Before(started.Add(2*time.Minute)) || job.Expires.After(time.Now().Add(2*time.Minute)) {
+		t.Fatal("configured TTL ignored")
+	}
+	// run() briefly publishes completed before clearing active.
+	for i := 0; i < 100; i++ {
+		err = m.Delete(job.ID)
+		if !errors.Is(err, ErrActive) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Get(job.ID); ok {
+		t.Fatal("deleted job visible")
+	}
+	m.mu.Lock()
+	used := m.used
+	m.mu.Unlock()
+	if used != 0 {
+		t.Fatal("storage not reclaimed")
+	}
+	if _, err := os.Stat(job.Files[0]); !os.IsNotExist(err) {
+		t.Fatal("file survived")
+	}
+}
+
+func TestDeleteActiveJobRejected(t *testing.T) {
+	started := make(chan struct{})
+	m, err := New(t.TempDir(), runnerFunc(func(ctx context.Context, _ Request, _ string) (string, error) {
+		close(started)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	job, _ := m.Submit(Request{})
+	<-started
+	if !errors.Is(m.Delete(job.ID), ErrActive) {
+		t.Fatal("running job deleted")
+	}
+}

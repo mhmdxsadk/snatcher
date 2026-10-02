@@ -112,7 +112,10 @@ func NewHandler(d *download.Manager, key string) http.Handler {
 		}
 		w.Header().Set("Location", "/"+version.API+"/jobs/"+job.ID)
 		w.Header().Set("Retry-After", "5")
-		writeJSON(w, http.StatusAccepted, job)
+		writeJSON(w, http.StatusAccepted, struct {
+			download.Job
+			Token string `json:"token"`
+		}{job, job.Token})
 		return
 	})
 
@@ -123,10 +126,9 @@ func NewHandler(d *download.Manager, key string) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
-			API     string `json:"api"`
-		}{Name: "Snatcher", Version: version.Release, API: version.API})
+			Name string `json:"name"`
+			API  string `json:"api"`
+		}{Name: "Snatcher", API: version.API})
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

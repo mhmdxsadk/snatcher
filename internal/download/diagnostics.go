@@ -9,7 +9,7 @@ import (
 )
 
 var diagnosticURL = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
-var diagnosticSecret = regexp.MustCompile(`(?i)(authorization|cookie|set-cookie|api[-_]?key|token|password|signature|sig)\s*[:=]\s*[^\r\n]+`)
+var diagnosticSecret = regexp.MustCompile(`(?i)(authorization|cookie|set-cookie|api[-_]?key|x-job-token|token|password|signature|sig)\s*[:=]\s*[^\r\n]+`)
 
 // Keep diagnostics in server logs, bounded and without URLs or credentials.
 func diagnostic(text string) string {

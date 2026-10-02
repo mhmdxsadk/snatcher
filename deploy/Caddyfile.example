@@ -1,0 +1,26 @@
+# Host Caddy example; preserve your existing TLS/Cloudflare configuration.
+snatcher.example.com {
+    log {
+        output file /var/log/caddy/snatcher.json {
+            mode 0600
+            roll_size 10MiB
+            roll_keep 3
+            roll_keep_for 72h
+        }
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers delete
+                resp_headers delete
+            }
+        }
+    }
+    reverse_proxy 127.0.0.1:8080 {
+        transport http {
+            max_conns_per_host 16
+            keepalive 30s
+            response_header_timeout 45s
+        }
+    }
+}

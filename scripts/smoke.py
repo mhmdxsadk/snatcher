@@ -15,10 +15,12 @@ KEY = os.environ["SNATCHER_API_KEY"]
 ORIGIN = "http://127.0.0.1:18081"
 
 
-def request(path, body=None, authenticated=True):
+def request(path, body=None, authenticated=True, token=None):
     headers = {"Content-Type": "application/json"}
     if authenticated:
         headers["X-API-Key"] = KEY
+    if token:
+        headers["X-Job-Token"] = token
     req = Request(path if path.startswith("http") else API + path,
                   data=json.dumps(body).encode() if body is not None else None,
                   headers=headers)
@@ -28,10 +30,11 @@ def request(path, body=None, authenticated=True):
 
 def job(path):
     result = request("/v2/snatch", {"url": ORIGIN + path})
+    token = result["token"]
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         time.sleep(3)
-        result = request("/v2/jobs/" + result["id"])
+        result = request("/v2/jobs/" + result["id"], token=token)
         if result["status"] in ("completed", "failed", "cancelled"):
             return result
     raise AssertionError("job did not finish")

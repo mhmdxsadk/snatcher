@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mhmdxsadk/snatcher/internal/download"
 	"github.com/mhmdxsadk/snatcher/internal/security"
@@ -19,6 +20,7 @@ type Config struct {
 	CobaltAPIKey string
 	ListenAddr   string
 	DownloadDir  string
+	JobTTL       time.Duration
 	StorageLimit int64
 	Security     security.Config
 }
@@ -41,6 +43,14 @@ func Load(getenv func(string) string) (Config, error) {
 	c.DownloadDir = strings.TrimSpace(getenv("DOWNLOAD_DIR"))
 	if c.DownloadDir == "" {
 		c.DownloadDir = "/tmp/snatcher-downloads"
+	}
+	c.JobTTL = download.DefaultJobTTL
+	if raw := strings.TrimSpace(getenv("JOB_TTL")); raw != "" {
+		ttl, err := time.ParseDuration(raw)
+		if err != nil || ttl < time.Minute || ttl > 24*time.Hour {
+			return Config{}, errors.New("JOB_TTL must be a duration between 1m and 24h")
+		}
+		c.JobTTL = ttl
 	}
 	c.StorageLimit = download.DefaultStorageLimit
 	if raw := strings.TrimSpace(getenv("STORAGE_LIMIT_BYTES")); raw != "" {

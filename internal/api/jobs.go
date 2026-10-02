@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"mime"
@@ -24,7 +25,19 @@ func downloadSignature(key, id, expiry string) string {
 }
 func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 	transfers := make(chan struct{}, 4)
+	authorize := func(w http.ResponseWriter, r *http.Request) bool {
+		job, ok := d.Get(r.PathValue("id"))
+		headers := r.Header.Values("X-Job-Token")
+		if !ok || len(headers) != 1 || subtle.ConstantTimeCompare([]byte(headers[0]), []byte(job.Token)) != 1 {
+			writeError(w, http.StatusNotFound, "not_found", "Job not found or expired.")
+			return false
+		}
+		return true
+	}
 	mux.HandleFunc("GET /"+version.API+"/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !authorize(w, r) {
+			return
+		}
 		job, ok := d.Get(r.PathValue("id"))
 		if !ok {
 			writeError(w, http.StatusNotFound, "not_found", "Job not found or expired.")
@@ -51,7 +64,7 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 					itemID += "/" + strconv.Itoa(index)
 				}
 				link := url.URL{Scheme: scheme, Host: r.Host, Path: "/download/" + itemID}
-				query := url.Values{"exp": {expiry}, "sig": {downloadSignature(key, itemID, expiry)}}
+				query := url.Values{"exp": {expiry}, "sig": {downloadSignature(job.Token, itemID, expiry)}}
 				link.RawQuery = query.Encode()
 				response.Items = append(response.Items, Item{URL: link.String(), Filename: filepath.Base(path), Type: download.MediaType(path, job.MediaType)})
 			}
@@ -59,12 +72,32 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 		writeJSON(w, http.StatusOK, response)
 	})
 	mux.HandleFunc("POST /"+version.API+"/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if !authorize(w, r) {
+			return
+		}
 		job, ok := d.Cancel(r.PathValue("id"))
 		if !ok {
 			writeError(w, http.StatusNotFound, "not_found", "Job not found.")
 			return
 		}
 		writeJSON(w, http.StatusOK, job)
+	})
+	mux.HandleFunc("DELETE /"+version.API+"/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !authorize(w, r) {
+			return
+		}
+		err := d.Delete(r.PathValue("id"))
+		switch {
+		case errors.Is(err, download.ErrActive):
+			writeError(w, http.StatusConflict, "job_active", "Cancel the job and wait for it to stop before deleting.")
+		case errors.Is(err, os.ErrNotExist):
+			writeError(w, http.StatusNotFound, "not_found", "Job not found or expired.")
+		case err != nil:
+			writeError(w, http.StatusInternalServerError, "delete_failed", "Unable to delete job.")
+		default:
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNoContent)
+		}
 	})
 	serveDownload := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" && r.Method != "HEAD" {
@@ -87,12 +120,13 @@ func registerJobs(mux *http.ServeMux, d *download.Manager, key string) {
 		expiry := r.URL.Query().Get("exp")
 		sig := r.URL.Query().Get("sig")
 		timestamp, err := strconv.ParseInt(expiry, 10, 64)
-		if err != nil || time.Now().Unix() >= timestamp || !hmac.Equal([]byte(sig), []byte(downloadSignature(key, itemID, expiry))) {
+		job, ok := d.Get(id)
+		if !ok || err != nil || time.Now().Unix() >= timestamp || timestamp > job.Expires.Unix() ||
+			!hmac.Equal([]byte(sig), []byte(downloadSignature(job.Token, itemID, expiry))) {
 			writeError(w, http.StatusForbidden, "invalid_link", "Download link is invalid or expired.")
 			return
 		}
-		job, ok := d.Get(id)
-		if !ok || job.Status != download.StatusCompleted || index >= len(job.Files) {
+		if job.Status != download.StatusCompleted || index >= len(job.Files) {
 			writeError(w, http.StatusNotFound, "not_found", "Download not found.")
 			return
 		}

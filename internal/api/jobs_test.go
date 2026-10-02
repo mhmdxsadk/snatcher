@@ -39,13 +39,18 @@ func TestDownloadJobLifecycle(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	location := w.Header().Get("Location")
+	var submitted struct{ Token string }
+	json.Unmarshal(w.Body.Bytes(), &submitted)
+	if len(submitted.Token) != 64 {
+		t.Fatal("missing job token")
+	}
 	var result struct {
 		Status string
 		Items  []Item
 	}
 	for i := 0; i < 100; i++ {
 		w = httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest("GET", location, nil))
+		h.ServeHTTP(w, jobRequest("GET", location, submitted.Token))
 		json.Unmarshal(w.Body.Bytes(), &result)
 		if result.Status == "completed" {
 			break
@@ -61,7 +66,7 @@ func TestDownloadJobLifecycle(t *testing.T) {
 	}
 	for _, origin := range []string{"https://snatcher.example", "http://localhost:8080", "http://[::1]:8080"} {
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest("GET", origin+location, nil))
+		h.ServeHTTP(response, jobRequest("GET", origin+location, submitted.Token))
 		var got struct{ Items []Item }
 		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
@@ -119,7 +124,7 @@ func TestGalleryLinks(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest("GET", "/v2/jobs/"+job.ID, nil))
+		handler.ServeHTTP(w, jobRequest("GET", "/v2/jobs/"+job.ID, job.Token))
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
@@ -169,6 +174,7 @@ func TestDownloadOriginBehindTrustedProxy(t *testing.T) {
 		r := httptest.NewRequest("GET", "http://snatcher.example/v2/jobs/"+j.ID, nil)
 		r.RemoteAddr = peer
 		r.Header.Set("X-API-Key", key)
+		r.Header.Set("X-Job-Token", j.Token)
 		r.Header.Set("X-Forwarded-Proto", "https")
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -245,7 +251,7 @@ func TestTransferCapacity(t *testing.T) {
 		t.Fatal(job)
 	}
 	expiry := strconv.FormatInt(job.Expires.Unix(), 10)
-	link := "/download/" + job.ID + "?exp=" + expiry + "&sig=" + downloadSignature("key", job.ID, expiry)
+	link := "/download/" + job.ID + "?exp=" + expiry + "&sig=" + downloadSignature(job.Token, job.ID, expiry)
 	h := NewHandler(m, "key")
 	entered, release, done := make(chan struct{}, 4), make(chan struct{}), make(chan struct{}, 4)
 	defer close(release)
@@ -275,5 +281,68 @@ func TestTransferCapacity(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest("GET", link, nil))
 	if w.Code != 200 {
 		t.Fatal(w.Code)
+	}
+}
+
+func jobRequest(method, path, token string) *http.Request {
+	r := httptest.NewRequest(method, path, nil)
+	r.Header.Set("X-Job-Token", token)
+	return r
+}
+
+func TestJobTokenIsolation(t *testing.T) {
+	m, err := download.New(t.TempDir(), testDownloadRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	a, _ := m.Submit(download.Request{})
+	b, _ := m.Submit(download.Request{})
+	if a.Token == b.Token {
+		t.Fatal("job tokens reused")
+	}
+	h := NewHandler(m, "shared-key")
+	for _, method := range []string{"GET", "POST", "DELETE"} {
+		path := "/v2/jobs/" + a.ID
+		if method == "POST" {
+			path += "/cancel"
+		}
+		for _, token := range []string{"", b.Token, "shared-key"} {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, jobRequest(method, path, token))
+			if w.Code != 404 {
+				t.Fatalf("%s accepted unrelated token: %d", method, w.Code)
+			}
+		}
+	}
+	for i := 0; i < 1000; i++ {
+		a, _ = m.Get(a.ID)
+		if a.Status == download.StatusCompleted {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	expiry := strconv.FormatInt(a.Expires.Unix(), 10)
+	w := httptest.NewRecorder()
+	forged := "/download/" + a.ID + "?exp=" + expiry + "&sig=" + downloadSignature("shared-key", a.ID, expiry)
+	h.ServeHTTP(w, httptest.NewRequest("GET", forged, nil))
+	if w.Code != 403 {
+		t.Fatal("shared key forged download", w.Code)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, jobRequest("GET", "/v2/jobs/"+a.ID, a.Token))
+	if w.Code != 200 || strings.Contains(w.Body.String(), a.Token) {
+		t.Fatal("token leaked or polling failed")
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, jobRequest("DELETE", "/v2/jobs/"+a.ID, a.Token))
+	if w.Code != 204 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if _, ok := m.Get(a.ID); ok {
+		t.Fatal("job survived deletion")
+	}
+	if _, err := os.Stat(a.Files[0]); !os.IsNotExist(err) {
+		t.Fatal("file survived deletion")
 	}
 }

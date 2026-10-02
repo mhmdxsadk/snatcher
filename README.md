@@ -19,11 +19,13 @@ docker compose up -d --build
 curl http://127.0.0.1:8080/health
 ```
 
+Before public sharing, follow the [security setup](https://github.com/mhmdxsadk/snatcher/wiki/Security).
+
 Keep the loopback port binding and use an HTTPS reverse proxy or Tailscale for
 remote access.
 
 Submit a URL to `POST /v2/snatch` with your `X-API-Key`. Poll the returned job
-location, then download the completed files.
+location using the returned token as `X-Job-Token`, then download the completed files.
 
 ## Documentation
 

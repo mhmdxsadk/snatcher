@@ -44,7 +44,7 @@ func run() error {
 	if cfg.CobaltAPI != "" {
 		pipeline.Fallback = &download.Cobalt{Endpoint: cfg.CobaltAPI, APIKey: cfg.CobaltAPIKey}
 	}
-	manager, err := download.NewWithStorageLimit(cfg.DownloadDir, pipeline, cfg.StorageLimit)
+	manager, err := download.NewWithOptions(cfg.DownloadDir, pipeline, cfg.StorageLimit, cfg.JobTTL)
 	if err != nil {
 		return err
 	}
